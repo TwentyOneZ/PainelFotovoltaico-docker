@@ -1,0 +1,20 @@
+{
+  "name": "painel-solar-fullstack",
+  "version": "1.0.0",
+  "description": "Backend Express + MQTT + WhatsApp + API + Front estático",
+  "main": "server.js",
+  "license": "MIT",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "baileys": "^6.7.9",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "mqtt": "^5.3.5",
+    "mysql2": "^3.11.3",
+    "pino": "^9.4.0",
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0"
+  }
+}

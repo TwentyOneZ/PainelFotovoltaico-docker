@@ -1,0 +1,46 @@
+services:
+  painel-app:
+    build: .
+    container_name: painel-solar-app
+    restart: unless-stopped
+    ports:
+      - "4000:3000"
+    environment:
+      # App
+      PORT: 3000
+      LOG_LEVEL: info
+
+      # MySQL (usa o serviço 'mysql' interno)
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASS: RunicK137
+      DB_NAME: painelSolar
+
+      # MQTT
+      MQTT_URL: mqtt://aws21.ddns.net:1883
+      MQTT_PINS_TOPIC: iot/painel/pins
+
+      # Baileys
+      AUTH_DIR: /data/baileys_auth_info
+    volumes:
+      - baileys_auth:/data/baileys_auth_info
+      - ./data:/data                    # sessão do WhatsApp fica em ./data/baileys_auth_info
+      - ./public:/app/public            # (dev) editar HTML
+      - ./server.js:/app/server.js      # (dev) hot-reload manual (reiniciar container)
+    depends_on:
+      - mysql
+
+  mysql:
+    image: mysql:8.4
+    container_name: painel-mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=RunicK137
+      - MYSQL_DATABASE=painelSolar
+    ports:
+      - "3307:3306"                     # host:container (3307 no host é opcional, só p/ acesso externo)
+    volumes:
+      - ./mysql-data:/var/lib/mysql
+
+volumes:
+  baileys_auth:
