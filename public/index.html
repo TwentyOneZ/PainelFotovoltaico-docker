@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
-    :root { --bg:#0b1220; --panel:#121a2b; --muted:#8ea0bf; --text:#e6eefc; --accent:#5b8cff; --accent-2:#7ee7f2; --ring:rgba(91,140,255,.5); }
+    :root { --bg:#0b1220; --panel:#121a2b; --muted:#8ea0bf; --text:#e6eefc; --accent:#5b8cff; --accent-2:#7ee7f2; --ring:rgba(91,140,255,.5); --red: #ff5c5c; }
     *{box-sizing:border-box} html,body{height:100%} body{margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,'Helvetica Neue',Arial;background:radial-gradient(1200px 800px at 80% -10%, rgba(91,140,255,.15), transparent), var(--bg);color:var(--text)}
     .container{max-width:1100px;margin:32px auto;padding:0 16px}
     .card{background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0));border:1px solid rgba(255,255,255,0.08);box-shadow:0 20px 40px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.04);border-radius:18px;padding:20px;backdrop-filter: blur(6px)}
@@ -46,7 +46,7 @@
             <option value="lux">Luminosidade (lux)</option>
             <option value="temperature">Temperatura (°C)</option>
             <option value="humidity">Umidade (%)</option>
-			<option value="irradiance">Irradiância (W/m²)</option>
+            <option value="irradiance">Irradiância (W/m²)</option>
           </select>
         </div>
         <div>
@@ -91,40 +91,65 @@
       $('endTime').value = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
     })();
 
-	let chart;
-	function ensureChart() {
-	  const ctx = $('chart').getContext('2d');
-	  if (chart) return chart;
+    let chart;
+    function ensureChart() {
+      const ctx = $('chart').getContext('2d');
+      if (chart) return chart;
 
-	  const styles = getComputedStyle(document.documentElement);
-	  const lineColor = styles.getPropertyValue('--accent').trim() || '#5b8cff';
+      const styles = getComputedStyle(document.documentElement);
+      const accentColor = styles.getPropertyValue('--accent').trim() || '#5b8cff';
+      const redColor = styles.getPropertyValue('--red').trim() || '#ff5c5c';
 
-	  chart = new Chart(ctx, {
-		type: 'line',
-		data: { datasets: [{ label: 'Valor', data: [], pointRadius: 0, tension: 0.15, borderWidth: 2, borderColor: lineColor }] },
-		options: {
-		  responsive: true,
-		  scales: {
-			  x: {
-				type: 'time',
-				time: {
-				  displayFormats: {
-					minute: 'HH:mm',
-					hour: 'HH:mm',
-					day: 'dd/MM HH:mm'
-				  }
-				},
-				ticks: { maxRotation: 0 }
-			  },
-			  y: { beginAtZero: false }
-			},
-		  plugins: { legend: { display: false }, tooltip: { intersect: false, mode: 'index' } },
-		  interaction: { intersect: false, mode: 'nearest' },
-		  spanGaps: true
-		}
-	  });
-	  return chart;
-	}
+      chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          datasets: [
+            // Dataset principal (azul)
+            {
+              label: 'Valor',
+              data: [],
+              pointRadius: 0,
+              tension: 0.15,
+              borderWidth: 2,
+              borderColor: accentColor
+            },
+            // Dataset secundário (vermelho) - para potência estimada
+            {
+              label: 'Potência Estimada (W)',
+              data: [],
+              pointRadius: 0,
+              tension: 0.15,
+              borderWidth: 2,
+              borderColor: redColor
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          scales: {
+            x: {
+              type: 'time',
+              time: {
+                displayFormats: {
+                  minute: 'HH:mm',
+                  hour: 'HH:mm',
+                  day: 'dd/MM HH:mm'
+                }
+              },
+              ticks: { maxRotation: 0 }
+            },
+            y: { beginAtZero: false }
+          },
+          plugins: {
+            legend: { display: true }, // Habilita a legenda
+            tooltip: { intersect: false, mode: 'index' }
+          },
+          interaction: { intersect: false, mode: 'nearest' },
+          spanGaps: true
+        }
+      });
+      return chart;
+    }
 
 
     const API_URL = '/api/readings';
@@ -147,58 +172,88 @@
     }
 
     function unitFor(metric){
-      return { voltage: 'V', current_mA: 'mA', power_mW: 'mW', lux: 'lux', temperature: '°C', humidity: '%' }[metric] || '';
+      return {
+        voltage: 'V',
+        current_mA: 'mA',
+        power_mW: 'mW',
+        lux: 'lux',
+        temperature: '°C',
+        humidity: '%',
+        irradiance: 'W/m²',
+        estimatedPower: 'W'
+      }[metric] || '';
+    }
+
+    // Função auxiliar para processar os dados da API para o formato do gráfico
+    function processDataForChart(rawData, metric) {
+        return rawData.map(p => {
+            const y = p[metric] ?? p.value;
+            if (y === null || y === undefined) return null;
+            const num = Number(y);
+            if (!Number.isFinite(num)) return null;
+            const localDate = new Date(p.ts);
+            return { x: localDate, y: num };
+        }).filter(Boolean);
     }
 
     $('run').addEventListener('click', async () => {
-	  const metric = $('metric').value;
-	  const startDate = $('startDate').value, startTime = $('startTime').value;
-	  const endDate = $('endDate').value, endTime = $('endTime').value;
-	  const msg = $('msg'); msg.style.display = 'none';
+      const metric = $('metric').value;
+      const startDate = $('startDate').value, startTime = $('startTime').value;
+      const endDate = $('endDate').value, endTime = $('endTime').value;
+      const msg = $('msg'); msg.style.display = 'none';
 
-	  if (!startDate || !startTime || !endDate || !endTime) {
-		msg.textContent = 'Preencha data e hora inicial e final.';
-		msg.className = 'msg error'; msg.style.display = 'block'; return;
-	  }
+      if (!startDate || !startTime || !endDate || !endTime) {
+        msg.textContent = 'Preencha data e hora inicial e final.';
+        msg.className = 'msg error'; msg.style.display = 'block'; return;
+      }
 
-	  const startISO = toISO(startDate, startTime);
-	  const endISO = toISO(endDate, endTime);
+      const startISO = toISO(startDate, startTime);
+      const endISO = toISO(endDate, endTime);
 
-	  const c = ensureChart();
-	  c.data.datasets[0].data = [];
-	  c.update();
+      const c = ensureChart();
+      // Limpa ambos os datasets
+      c.data.datasets[0].data = [];
+      c.data.datasets[1].data = [];
+      c.update();
 
-	  $('legend').textContent = `Exibindo: ${metric} (${unitFor(metric)}) de ${startISO} a ${endISO}`;
+      $('legend').textContent = `Exibindo: ${metric} (${unitFor(metric)}) de ${startISO} a ${ENDISO}`;
 
-	  try {
-		const raw = await fetchReadings(metric, startISO, endISO);
+      try {
+        // Busca o dado da métrica principal
+        const primaryRaw = await fetchReadings(metric, startISO, endISO);
+        const primaryPoints = processDataForChart(primaryRaw, metric);
 
-		// transforma em pontos {x,y}, ignorando null/undefined/NaN
-		const points = raw.map(p => {
-		  const y = p[metric] ?? p.value;     // backend pode mandar no campo da métrica ou em 'value'
-		  if (y === null || y === undefined) return null;
-		  const num = Number(y);
-		  if (!Number.isFinite(num)) return null;
-		  const localDate = new Date(p.ts); // já interpreta o ISO em UTC
-		  // converte para ms local (UTC + offset do browser)
-		  const localTime = new Date(localDate.getTime() + localDate.getTimezoneOffset() * 60000);
-		  return { x: localTime, y: num };
-		}).filter(Boolean);
+        c.data.datasets[0].label = `${metric} (${unitFor(metric)})`;
+        c.data.datasets[0].data = primaryPoints;
 
-		c.data.datasets[0].label = `${metric} (${unitFor(metric)})`;
-		c.data.datasets[0].data = points;
-		c.update();
+        let hasData = primaryPoints.length > 0;
 
-		if (!points.length) {
-		  msg.textContent = 'Nenhum dado para o intervalo selecionado.';
-		  msg.className = 'msg'; msg.style.display = 'block';
-		}
-	  } catch (err) {
-		msg.textContent = 'Erro ao carregar dados: ' + err.message;
-		msg.className = 'msg error'; msg.style.display = 'block';
-	  }
-	});
+        // Se a métrica for 'power_mW', busca também 'estimatedPower'
+        if (metric === 'power_mW') {
+          try {
+            const secondaryRaw = await fetchReadings('estimatedPower', startISO, endISO);
+            const secondaryPoints = processDataForChart(secondaryRaw, 'estimatedPower');
+            c.data.datasets[1].label = `Potência Estimada (W)`;
+            c.data.datasets[1].data = secondaryPoints;
+            if (secondaryPoints.length > 0) hasData = true;
+          } catch (err) {
+            console.warn('Não foi possível carregar a potência estimada:', err);
+            // Não mostra erro para o usuário, apenas não exibe a linha
+          }
+        }
 
+        c.update();
+
+        if (!hasData) {
+          msg.textContent = 'Nenhum dado para o intervalo selecionado.';
+          msg.className = 'msg'; msg.style.display = 'block';
+        }
+
+      } catch (err) {
+        msg.textContent = 'Erro ao carregar dados: ' + err.message;
+        msg.className = 'msg error'; msg.style.display = 'block';
+      }
+    });
   </script>
 </body>
 </html>

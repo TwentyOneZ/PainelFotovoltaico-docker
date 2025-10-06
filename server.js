@@ -40,12 +40,12 @@ const {
   LOG_LEVEL = 'debug'
 } = process.env;
 
-// 1. ADICIONA NOVO TÓPICO À LISTA
 const MQTT_TOPICS = [
   'iot/painel/INA226',
   'iot/painel/TSL2591',
   'iot/painel/AHT20',
-  'iot/painel/irradiance' // 🚨 NOVO TÓPICO
+  'iot/painel/irradiance',
+  'iot/painel/estimatedPower'
 ];
 
 const logger = P({ level: LOG_LEVEL });
@@ -83,7 +83,8 @@ async function initDb() {
       lux DOUBLE NULL,
       temperature DOUBLE NULL,
       humidity DOUBLE NULL,
-      irradiance DOUBLE NULL,  -- 🚨 NOVA COLUNA
+      irradiance DOUBLE NULL,
+      estimatedPower DOUBLE NULL,
       INDEX idx_ts (ts)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `;
@@ -93,13 +94,14 @@ async function initDb() {
 
 // ====== Estado atual (últimos valores) ======
 const state = {
-  voltage: null,       // V
-  current_mA: null,    // mA
-  power_mW: null,      // mW
-  lux: null,           // lux
-  temperature: null,   // °C
-  humidity: null,      // %
-  irradiance: null     // 🚨 NOVO ESTADO
+  voltage: null,
+  current_mA: null,
+  power_mW: null,
+  lux: null,
+  temperature: null,
+  humidity: null,
+  irradiance: null,
+  estimatedPower: null
 };
 
 // ====== MQTT ======
@@ -113,6 +115,22 @@ function initMqtt() {
       if (err) logger.error(err, 'Erro ao assinar tópicos MQTT');
       else logger.info({ topics: MQTT_TOPICS }, '📥 Inscrito nos tópicos');
     });
+
+    // 🚨 NOVO BLOCO: Publica o estado consolidado a cada segundo 🚨
+    const ALL_IN_ONE_TOPIC = 'iot/painel/all';
+    setInterval(() => {
+      // Garante que só publica se estiver conectado
+      if (mqttClient.connected) {
+        const payload = JSON.stringify(state);
+        mqttClient.publish(ALL_IN_ONE_TOPIC, payload, { qos: 0 }, (err) => {
+          if (err) {
+            logger.error({ err, topic: ALL_IN_ONE_TOPIC }, 'Erro ao publicar no tópico consolidado');
+          }
+        });
+      }
+    }, 1000); // Executa a cada 1000 ms = 1 segundo
+    logger.info(`📢 Publicando estado consolidado em "${ALL_IN_ONE_TOPIC}" a cada 1 segundo.`);
+    // 🚨 FIM DO NOVO BLOCO 🚨
   });
 
   mqttClient.on('message', async (topic, payloadBuf) => {
@@ -121,31 +139,28 @@ function initMqtt() {
     try { data = JSON.parse(str); } catch { return; }
 
     if (topic === 'iot/painel/INA226') {
-      // Espera { voltage: <V>, current: <A>, power: <W> }
       if (typeof data.voltage === 'number') state.voltage = data.voltage;
-      if (typeof data.current === 'number') state.current_mA = data.current; // A -> mA
-      if (typeof data.power   === 'number') state.power_mW   = data.power; // W -> mW
+      if (typeof data.current === 'number') state.current_mA = data.current;
+      if (typeof data.power   === 'number') state.power_mW   = data.power;
     } else if (topic === 'iot/painel/TSL2591') {
-      // Espera { lux: <lux> }
       let lux = data.lux;
-      if (lux === null || lux === undefined) lux = 0; // força 0 se vier null
+      if (lux === null || lux === undefined) lux = 0;
       if (typeof lux === 'number') state.lux = lux;
     } else if (topic === 'iot/painel/AHT20') {
-      // Espera { temperature: <C>, humidity: <percent> }
       if (typeof data.temperature === 'number') state.temperature = data.temperature;
       if (typeof data.humidity    === 'number') state.humidity    = data.humidity;
-    } else if (topic === 'iot/painel/irradiance') { // 🚨 NOVA LÓGICA DE MENSAGEM
-      // Espera { irradiance: <W/m²> }
+    } else if (topic === 'iot/painel/irradiance') {
       if (typeof data.irradiance === 'number') state.irradiance = data.irradiance;
+    } else if (topic === 'iot/painel/estimatedPower') {
+      if (typeof data.estimatedPower === 'number') state.estimatedPower = data.estimatedPower;
     } else {
-      return; // ignora outros tópicos
+      return;
     }
 
-    // Insere snapshot
     try {
       const insertSql = `
-        INSERT INTO readings (voltage, current_mA, power_mW, lux, temperature, humidity, irradiance)
-        VALUES (?, ?, ?, ?, ?, ?, ?) -- 🚨 ADICIONADO NOVO VALOR
+        INSERT INTO readings (voltage, current_mA, power_mW, lux, temperature, humidity, irradiance, estimatedPower)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `;
       const vals = [
         state.voltage,
@@ -154,10 +169,10 @@ function initMqtt() {
         state.lux === null ? 0 : state.lux,
         state.temperature,
         state.humidity,
-        state.irradiance  // 🚨 ADICIONADO À LISTA DE VALORES
+        state.irradiance,
+        state.estimatedPower
       ];
       await pool.query(insertSql, vals);
-      // logger.debug({ vals }, 'Leitura salva');
     } catch (e) {
       logger.error(e, 'Erro ao inserir leitura');
     }
@@ -165,7 +180,7 @@ function initMqtt() {
 }
 
 // ====== API /api/readings ======
-const ALLOWED_METRICS = new Set(['voltage','current_mA','power_mW','lux','temperature','humidity','irradiance']); // 🚨 ATUALIZA PERMISSÕES
+const ALLOWED_METRICS = new Set(['voltage','current_mA','power_mW','lux','temperature','humidity','irradiance', 'estimatedPower']);
 
 function toMysqlDateTimeUTC(isoStr) {
   const d = new Date(isoStr);
@@ -183,11 +198,9 @@ app.get('/api/readings', async (req, res) => {
       return res.status(400).json({ error: 'Parâmetros "start" e "end" são obrigatórios (ISO).' });
     }
 
-    const startUtc = toMysqlDateTimeUTC(start); // ex.: '2025-08-19 08:20:00'
+    const startUtc = toMysqlDateTimeUTC(start);
     const endUtc   = toMysqlDateTimeUTC(end);
 
-    // Converte a coluna ts para UTC e filtra no intervalo;
-    // também ignora valores NULL e limita linhas (evita gráfico “lotado”)
     const sql = `
       SELECT ts, \`${metric}\` AS value
       FROM readings
@@ -200,7 +213,7 @@ app.get('/api/readings', async (req, res) => {
     const [rows] = await pool.query(sql, [startUtc, endUtc]);
 
     const data = rows.map(r => ({
-      ts: new Date(r.ts).toISOString(),         // volta em ISO/UTC para o front
+      ts: new Date(r.ts).toISOString(),
       [metric]: r.value !== null ? Number(r.value) : null
     }));
     res.json(data);
@@ -237,16 +250,13 @@ async function startSock() {
       const update = events['connection.update'];
       const { connection, lastDisconnect, qr } = update;
 
-      // Se chegou um QR novo, guarda e mostra
       if (qr) {
         lastQR = qr;
-        // imprime no terminal em ASCII (para docker logs)
         qrcodeTerminal.generate(qr, { small: true });
         logger.info('📱 QR atualizado — acesse http://localhost:3000/qr para escanear.');
       }
 
       if (connection === 'open') {
-        // logado, limpa QR
         lastQR = null;
         logger.info('✅ WhatsApp conectado.');
       }
@@ -271,9 +281,6 @@ async function startSock() {
 
       for (const m of upsert.messages) {
         const remoteJid = m.key.remoteJid;
-        const isGroup = remoteJid?.endsWith('@g.us');
-        // if (isGroup) continue; // opcional: ignora grupos
-
         const text =
           m.message?.conversation ||
           m.message?.extendedTextMessage?.text ||
@@ -284,12 +291,11 @@ async function startSock() {
         
         logger.info(`📨 Mensagem recebida de ${remoteJid}`);
         
-        // #status => últimos 5
         if (cmd === '#status') {
           try {
             const q = `
               SELECT DATE_FORMAT(ts, '%Y-%m-%d %H:%i:%s') AS ts,
-                      voltage, current_mA, power_mW, lux, temperature, humidity, irradiance
+                      voltage, current_mA, power_mW, lux, temperature, humidity, irradiance, estimatedPower
               FROM readings
               ORDER BY ts DESC
               LIMIT 1
@@ -312,7 +318,8 @@ async function startSock() {
               `Luminosidade: ${fmt(r.lux, ' lux')}`,
               `Temperatura: ${fmt(r.temperature, ' °C')}`,
               `Umidade: ${fmt(r.humidity, ' %')}`,
-              `Irradiância: ${fmt(r.irradiance, ' W/m²')}` // 🚨 ADICIONADO AO RELATÓRIO DO STATUS
+              `Irradiância: ${fmt(r.irradiance, ' W/m²')}`,
+              `Pot. Estimada: ${fmt(r.estimatedPower, ' W')}`
             ].join('\n'));
 
             const reply = `📊 Última leitura:\n\n${lines.join('\n\n')}`;
@@ -324,7 +331,6 @@ async function startSock() {
           continue;
         }
 
-        // #limpezaOn
         if (cmd === '#limpezaon') {
           const payload = JSON.stringify({ GPIO23: 'high' });
           mqttClient.publish(MQTT_PINS_TOPIC, payload, { qos: 1 }, async (err) => {
@@ -339,7 +345,6 @@ async function startSock() {
           continue;
         }
 
-        // #limpezaOff
         if (cmd === '#limpezaoff') {
           const payload = JSON.stringify({ GPIO23: 'low' });
           mqttClient.publish(MQTT_PINS_TOPIC, payload, { qos: 1 }, async (err) => {
