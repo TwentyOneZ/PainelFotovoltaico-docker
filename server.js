@@ -106,6 +106,10 @@ const state = {
 
 // ====== MQTT ======
 let mqttClient;
+
+// NOVO: flag para controlar se entrou dado no último segundo
+let receivedSinceLastTick = false;
+
 function initMqtt() {
   mqttClient = mqtt.connect(MQTT_URL);
 
@@ -116,11 +120,13 @@ function initMqtt() {
       else logger.info({ topics: MQTT_TOPICS }, '📥 Inscrito nos tópicos');
     });
 
-    // 🚨 NOVO BLOCO: Publica o estado consolidado a cada segundo 🚨
+    // 🚨 Publica o estado consolidado apenas se houve dados no último segundo 🚨
     const ALL_IN_ONE_TOPIC = 'iot/painel/all';
     setInterval(() => {
-      // Garante que só publica se estiver conectado
-      if (mqttClient.connected) {
+      // publica somente se:
+      // 1) cliente MQTT está conectado
+      // 2) recebemos alguma mensagem desde o último "tick" de 1s
+      if (mqttClient.connected && receivedSinceLastTick) {
         const payload = JSON.stringify(state);
         mqttClient.publish(ALL_IN_ONE_TOPIC, payload, { qos: 0 }, (err) => {
           if (err) {
@@ -128,15 +134,20 @@ function initMqtt() {
           }
         });
       }
-    }, 1000); // Executa a cada 1000 ms = 1 segundo
-    logger.info(`📢 Publicando estado consolidado em "${ALL_IN_ONE_TOPIC}" a cada 1 segundo.`);
-    // 🚨 FIM DO NOVO BLOCO 🚨
+      // reset do marcador para a próxima janela de 1s
+      receivedSinceLastTick = false;
+    }, 1000);
+    logger.info(`📢 Publicando estado consolidado em "${ALL_IN_ONE_TOPIC}" apenas quando houver novas leituras no último segundo.`);
+    // 🚨 FIM 🚨
   });
 
   mqttClient.on('message', async (topic, payloadBuf) => {
     const str = payloadBuf.toString().trim();
     let data;
     try { data = JSON.parse(str); } catch { return; }
+
+    // NOVO: marca que recebemos dado válido nesta janela
+    receivedSinceLastTick = true;
 
     if (topic === 'iot/painel/INA226') {
       if (typeof data.voltage === 'number') state.voltage = data.voltage;

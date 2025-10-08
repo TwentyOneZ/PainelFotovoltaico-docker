@@ -42,5 +42,11 @@ services:
     volumes:
       - ./mysql-data:/var/lib/mysql
 
+  # --- NOVO SERVIÇO ADICIONADO ---
+  digital-twin:
+    build: ./digital-twin
+    container_name: digital-twin-pv
+    restart: unless-stopped
+
 volumes:
   baileys_auth:

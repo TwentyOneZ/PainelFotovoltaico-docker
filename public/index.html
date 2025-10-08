@@ -68,6 +68,14 @@
             <button id="run">Exibir gráfico</button>
           </div>
         </div>
+        <div>
+          <label for="maToggle">Média móvel</label>
+          <div class="actions">
+            <input type="checkbox" id="maToggle" />
+            <input type="number" id="maWindow" min="1" value="5" style="width:90px" />
+            <span class="hint" style="margin-left:8px">min</span>
+          </div>
+        </div>        
       </div>
       <div class="hint">O fuso é o do seu navegador; a API retorna ISO/UTC.</div>
       <div id="msg" class="msg"></div>
@@ -98,14 +106,13 @@
 
       const styles = getComputedStyle(document.documentElement);
       const accentColor = styles.getPropertyValue('--accent').trim() || '#5b8cff';
-      const redColor = styles.getPropertyValue('--red').trim() || '#ff5c5c';
+      const redColor    = styles.getPropertyValue('--red').trim() || '#ff5c5c';
 
       chart = new Chart(ctx, {
         type: 'line',
         data: {
           datasets: [
-            // Dataset principal (azul)
-            {
+            { // principal
               label: 'Valor',
               data: [],
               pointRadius: 0,
@@ -113,37 +120,26 @@
               borderWidth: 2,
               borderColor: accentColor
             },
-            // Dataset secundário (vermelho) - para potência estimada
-            {
+            { // potência estimada – começa oculta
               label: 'Potência Estimada (W)',
               data: [],
               pointRadius: 0,
               tension: 0.15,
               borderWidth: 2,
-              borderColor: redColor
+              borderColor: redColor,
+              hidden: true
             }
           ]
         },
         options: {
           responsive: true,
           scales: {
-            x: {
-              type: 'time',
-              time: {
-                displayFormats: {
-                  minute: 'HH:mm',
-                  hour: 'HH:mm',
-                  day: 'dd/MM HH:mm'
-                }
-              },
-              ticks: { maxRotation: 0 }
-            },
+            x: { type: 'time',
+                time: { displayFormats: { minute: 'HH:mm', hour: 'HH:mm', day: 'dd/MM HH:mm' } },
+                ticks: { maxRotation: 0 } },
             y: { beginAtZero: false }
           },
-          plugins: {
-            legend: { display: true }, // Habilita a legenda
-            tooltip: { intersect: false, mode: 'index' }
-          },
+          plugins: { legend: { display: true }, tooltip: { intersect: false, mode: 'index' } },
           interaction: { intersect: false, mode: 'nearest' },
           spanGaps: true
         }
@@ -196,10 +192,39 @@
         }).filter(Boolean);
     }
 
+    // Média móvel por janela de tempo (minutos) usando janela deslizante
+    function rollingMeanByMinutes(points, windowMinutes) {
+      if (!Array.isArray(points) || points.length === 0) return points;
+      const winMs = Math.max(1, windowMinutes) * 60 * 1000;
+
+      // Garante ordenação temporal
+      const sorted = [...points].sort((a, b) => a.x - b.x);
+
+      const res = [];
+      const q = []; // fila deslizante {x, y}
+      let sum = 0;
+
+      for (const p of sorted) {
+        const t = p.x.getTime();
+        q.push(p);
+        sum += p.y;
+
+        // Remove pontos fora da janela [t - winMs, t]
+        while (q.length && (t - q[0].x.getTime()) > winMs) {
+          sum -= q[0].y;
+          q.shift();
+        }
+
+        res.push({ x: p.x, y: sum / q.length });
+      }
+      return res;
+    }
+
+
     $('run').addEventListener('click', async () => {
       const metric = $('metric').value;
       const startDate = $('startDate').value, startTime = $('startTime').value;
-      const endDate = $('endDate').value, endTime = $('endTime').value;
+      const endDate   = $('endDate').value,   endTime   = $('endTime').value;
       const msg = $('msg'); msg.style.display = 'none';
 
       if (!startDate || !startTime || !endDate || !endTime) {
@@ -208,37 +233,57 @@
       }
 
       const startISO = toISO(startDate, startTime);
-      const endISO = toISO(endDate, endTime);
+      const endISO   = toISO(endDate, endTime);
 
       const c = ensureChart();
-      // Limpa ambos os datasets
+
+      // limpa datasets
       c.data.datasets[0].data = [];
       c.data.datasets[1].data = [];
+      c.data.datasets[1].hidden = true;
       c.update();
 
-      $('legend').textContent = `Exibindo: ${metric} (${unitFor(metric)}) de ${startISO} a ${ENDISO}`;
+      // ✅ corrigido: usar endISO (não ENDISO)
+      $('legend').textContent = `Exibindo: ${metric} (${unitFor(metric)}) de ${startISO} a ${endISO}`;
+
+      // >>> NOVO: ler opções de média móvel
+      const useMA   = $('maToggle').checked;
+      const winMins = parseInt($('maWindow').value, 10) || 5;
 
       try {
-        // Busca o dado da métrica principal
-        const primaryRaw = await fetchReadings(metric, startISO, endISO);
-        const primaryPoints = processDataForChart(primaryRaw, metric);
+        // métrica principal
+        const primaryRaw    = await fetchReadings(metric, startISO, endISO);
+        let   primaryPoints = processDataForChart(primaryRaw, metric);
 
-        c.data.datasets[0].label = `${metric} (${unitFor(metric)})`;
-        c.data.datasets[0].data = primaryPoints;
+        if (useMA) {
+          primaryPoints = rollingMeanByMinutes(primaryPoints, winMins);
+          c.data.datasets[0].label = `${metric} (${unitFor(metric)}) — MM ${winMins} min`;
+        } else {
+          c.data.datasets[0].label = `${metric} (${unitFor(metric)})`;
+        }
+        c.data.datasets[0].data  = primaryPoints;
 
         let hasData = primaryPoints.length > 0;
 
-        // Se a métrica for 'power_mW', busca também 'estimatedPower'
+        // potência estimada só se a métrica for Potência (mW)
         if (metric === 'power_mW') {
           try {
-            const secondaryRaw = await fetchReadings('estimatedPower', startISO, endISO);
-            const secondaryPoints = processDataForChart(secondaryRaw, 'estimatedPower');
-            c.data.datasets[1].label = `Potência Estimada (W)`;
-            c.data.datasets[1].data = secondaryPoints;
+            const secondaryRaw    = await fetchReadings('estimatedPower', startISO, endISO);
+            let   secondaryPoints = processDataForChart(secondaryRaw, 'estimatedPower');
+
+            if (useMA) {
+              secondaryPoints = rollingMeanByMinutes(secondaryPoints, winMins);
+              c.data.datasets[1].label  = `Potência Estimada (W) — MM ${winMins} min`;
+            } else {
+              c.data.datasets[1].label  = `Potência Estimada (W)`;
+            }
+
+            c.data.datasets[1].data   = secondaryPoints;
+            c.data.datasets[1].hidden = secondaryPoints.length === 0;
             if (secondaryPoints.length > 0) hasData = true;
           } catch (err) {
             console.warn('Não foi possível carregar a potência estimada:', err);
-            // Não mostra erro para o usuário, apenas não exibe a linha
+            c.data.datasets[1].hidden = true;
           }
         }
 
@@ -248,12 +293,13 @@
           msg.textContent = 'Nenhum dado para o intervalo selecionado.';
           msg.className = 'msg'; msg.style.display = 'block';
         }
-
       } catch (err) {
         msg.textContent = 'Erro ao carregar dados: ' + err.message;
         msg.className = 'msg error'; msg.style.display = 'block';
       }
     });
+
   </script>
+
 </body>
 </html>
