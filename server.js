@@ -193,6 +193,18 @@ function initMqtt() {
 // ====== API /api/readings ======
 const ALLOWED_METRICS = new Set(['voltage','current_mA','power_mW','lux','temperature','humidity','irradiance', 'estimatedPower']);
 
+// NOVO: Lista de todas as métricas para exportação
+const ALL_METRICS = [
+  'voltage',
+  'current_mA',
+  'power_mW',
+  'lux',
+  'temperature',
+  'humidity',
+  'irradiance',
+  'estimatedPower'
+];
+
 function toMysqlDateTimeUTC(isoStr) {
   const d = new Date(isoStr);
   if (Number.isNaN(d.getTime())) throw new Error('Invalid ISO: ' + isoStr);
@@ -231,6 +243,68 @@ app.get('/api/readings', async (req, res) => {
   } catch (err) {
     logger.error(err, 'Erro /api/readings');
     res.status(500).json({ error: 'Erro interno ao consultar o banco.' });
+  }
+});
+
+// ====== API /api/download (Exportação CSV de todos os dados) ======
+app.get('/api/download', async (req, res) => {
+  try {
+    const { start, end } = req.query;
+
+    if (!start || !end) {
+      return res.status(400).json({ error: 'Parâmetros "start" e "end" são obrigatórios (ISO).' });
+    }
+
+    const startUtc = toMysqlDateTimeUTC(start);
+    const endUtc   = toMysqlDateTimeUTC(end);
+
+    // Consulta SQL para selecionar a coluna de tempo e todas as métricas
+    const columns = ['ts'].concat(ALL_METRICS).map(col => `\`${col}\``).join(', ');
+    const sql = `
+      SELECT ${columns}
+      FROM readings
+      WHERE CONVERT_TZ(ts, @@session.time_zone, '+00:00')
+             BETWEEN ? AND ?
+      ORDER BY ts ASC
+      LIMIT 50000 
+    `;
+    const [rows] = await pool.query(sql, [startUtc, endUtc]);
+
+    if (rows.length === 0) {
+      // 204 No Content - Nenhum dado para baixar
+      return res.status(204).send(); 
+    }
+
+    // 1. Gerar o cabeçalho CSV
+    const headerLabels = ['Instante'].concat(ALL_METRICS);
+    const csvHeader = headerLabels.join(';') + '\n';
+    
+    // 2. Gerar as linhas de dados CSV
+    const csvData = rows.map(row => {
+      // Converte o timestamp para ISO String formatado para CSV
+      const ts = new Date(row.ts).toISOString().replace('T', ' ').slice(0, 19);
+      
+      const values = ALL_METRICS.map(metric => {
+        const value = row[metric];
+        // Retorna string vazia para NULL e valor numérico para os demais, 
+        // usando ponto decimal para CSV (embora usemos ';' como separador)
+        return value !== null && value !== undefined ? String(Number(value)) : '';
+      });
+      
+      return [ts].concat(values).join(';');
+    }).join('\n');
+
+    const csvContent = csvHeader + csvData;
+
+    // 3. Configurar headers para download do arquivo CSV
+    const filename = `dados_painel_full_${start.slice(0, 10)}_a_${end.slice(0, 10)}.csv`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(csvContent);
+
+  } catch (err) {
+    logger.error(err, 'Erro /api/download');
+    res.status(500).json({ error: 'Erro interno ao consultar o banco para download.' });
   }
 });
 

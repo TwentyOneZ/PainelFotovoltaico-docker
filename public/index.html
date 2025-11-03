@@ -25,6 +25,7 @@
     .actions{display:flex;gap:12px;align-items:end}
     button{appearance:none;border:none;padding:12px 16px;border-radius:12px;font-weight:600;letter-spacing:.2px;background:linear-gradient(135deg,var(--accent),#6aa1ff);color:white;cursor:pointer;transition:transform .06s ease, filter .2s ease, box-shadow .2s ease;box-shadow:0 8px 18px rgba(91,140,255,.35)}
     button:hover{filter:brightness(1.05)} button:active{transform:translateY(1px)}
+    .download-btn{background:linear-gradient(135deg,#343d51,#4a5468);box-shadow:0 8px 18px rgba(0,0,0,.35);}
     .chart-wrap{margin-top:18px}
     .hint{color:var(--muted);font-size:12px;margin-top:8px}
     .msg{margin-top:12px;font-size:14px;color:#d9e2ff;background:rgba(125,160,255,0.08);border:1px solid rgba(125,160,255,0.18);padding:10px 12px;border-radius:12px;display:none}
@@ -66,6 +67,7 @@
           <div class="actions">
             <input type="time" id="endTime" step="60" style="flex:1" />
             <button id="run">Exibir gráfico</button>
+            <button id="downloadCsv" class="download-btn">Baixar CSV</button> </div>
           </div>
         </div>
         <div>
@@ -298,7 +300,64 @@
         msg.className = 'msg error'; msg.style.display = 'block';
       }
     });
+    
+    // NOVO: Lógica para o botão de download CSV
+    $('downloadCsv').addEventListener('click', async () => {
+      const startDate = $('startDate').value, startTime = $('startTime').value;
+      const endDate   = $('endDate').value,   endTime   = $('endTime').value;
+      const msg = $('msg'); msg.style.display = 'none';
 
+      if (!startDate || !startTime || !endDate || !endTime) {
+        msg.textContent = 'Preencha data e hora inicial e final para o download.';
+        msg.className = 'msg error'; msg.style.display = 'block'; return;
+      }
+
+      const startISO = toISO(startDate, startTime);
+      const endISO   = toISO(endDate, endTime);
+
+      msg.textContent = 'Preparando download...';
+      msg.className = 'msg'; msg.style.display = 'block';
+
+      try {
+        const url = new URL('/api/download', window.location.origin);
+        url.searchParams.set('start', startISO);
+        url.searchParams.set('end', endISO);
+
+        const res = await fetch(url.toString());
+
+        if (res.status === 204) {
+             msg.textContent = 'Nenhum dado encontrado para o intervalo selecionado.';
+             msg.className = 'msg'; msg.style.display = 'block';
+             return;
+        }
+        
+        if (!res.ok) throw new Error(`Erro na API: ${res.status} ${res.statusText}`);
+        
+        const blob = await res.blob();
+        
+        // Cria um link temporário para forçar o download
+        const a = document.createElement('a');
+        // Tenta obter o nome do arquivo do header 'Content-Disposition', ou usa um fallback
+        const contentDisposition = res.headers.get('Content-Disposition');
+        const filename = contentDisposition ? 
+                         contentDisposition.split('filename=')[1].replace(/"/g, '') : 
+                         `dados_painel_full_${startDate}_a_${endDate}.csv`;
+
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(a.href);
+        
+        msg.textContent = 'Download concluído! O arquivo CSV (separado por ponto e vírgula) pode ser aberto em programas de planilha.';
+        msg.className = 'msg'; msg.style.display = 'block';
+        
+      } catch (err) {
+        msg.textContent = 'Erro ao baixar dados: ' + err.message;
+        msg.className = 'msg error'; msg.style.display = 'block';
+      }
+    });
   </script>
 
 </body>
