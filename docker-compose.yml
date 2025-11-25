@@ -19,7 +19,7 @@ services:
 
       # MQTT
       MQTT_URL: mqtt://cerise.freeddns.org:30001
-      MQTT_PINS_TOPIC: iot/painel/pins
+      MQTT_PINS_TOPIC: /painelfotovoltaico.gerador/GPIO
 
       # Baileys
       AUTH_DIR: /data/baileys_auth_info
