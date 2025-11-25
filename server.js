@@ -43,6 +43,8 @@ const {
   LOG_LEVEL = 'debug'
 } = process.env;
 
+const GPIO_THING_ID = 'painelfotovoltaico.gerador:GPIO';
+
 // Tópicos Ditto (eventos) a serem assinados
 const MQTT_TOPICS = [
   '/ditto/events/painelfotovoltaico.gerador/GPIO',
