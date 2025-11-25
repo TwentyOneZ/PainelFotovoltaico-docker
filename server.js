@@ -51,7 +51,9 @@ const MQTT_TOPICS = [
   '/ditto/events/painelfotovoltaico.gerador/INA226',
   '/ditto/events/painelfotovoltaico.gerador/TSL2591',
   '/ditto/events/painelfotovoltaico.gerador/BMP280',
-  '/ditto/events/painelfotovoltaico.gerador/AHT20'
+  '/ditto/events/painelfotovoltaico.gerador/AHT20',
+  '/ditto/events/painelfotovoltaico.referencia/irradiance',
+  '/ditto/events/painelfotovoltaico.referencia/estimatedPower',
 ];
 
 const logger = P({ level: LOG_LEVEL });
@@ -129,23 +131,23 @@ function initMqtt() {
       else logger.info({ topics: MQTT_TOPICS }, '📥 Inscrito nos tópicos Ditto');
     });
 
-    // Publica o estado consolidado apenas se houve dados no último segundo
-    const ALL_IN_ONE_TOPIC = 'iot/painel/all';
-    setInterval(() => {
-      if (mqttClient.connected && receivedSinceLastTick) {
-        const payload = JSON.stringify(state);
-        mqttClient.publish(ALL_IN_ONE_TOPIC, payload, { qos: 0 }, (err) => {
-          if (err) {
-            logger.error({ err, topic: ALL_IN_ONE_TOPIC }, 'Erro ao publicar no tópico consolidado');
-          }
-        });
-      }
-      receivedSinceLastTick = false;
-    }, 1000);
+    // // Publica o estado consolidado apenas se houve dados no último segundo
+    // const ALL_IN_ONE_TOPIC = 'iot/painel/all';
+    // setInterval(() => {
+    //   if (mqttClient.connected && receivedSinceLastTick) {
+    //     const payload = JSON.stringify(state);
+    //     mqttClient.publish(ALL_IN_ONE_TOPIC, payload, { qos: 0 }, (err) => {
+    //       if (err) {
+    //         logger.error({ err, topic: ALL_IN_ONE_TOPIC }, 'Erro ao publicar no tópico consolidado');
+    //       }
+    //     });
+    //   }
+    //   receivedSinceLastTick = false;
+    // }, 1000);
 
-    logger.info(
-      `📢 Publicando estado consolidado em "${ALL_IN_ONE_TOPIC}" apenas quando houver novas leituras no último segundo.`
-    );
+    // logger.info(
+    //   `📢 Publicando estado consolidado em "${ALL_IN_ONE_TOPIC}" apenas quando houver novas leituras no último segundo.`
+    // );
   });
 
   mqttClient.on('error', (err) => {
@@ -330,7 +332,7 @@ app.get('/api/download', async (req, res) => {
       WHERE CONVERT_TZ(ts, @@session.time_zone, '+00:00')
              BETWEEN ? AND ?
       ORDER BY ts ASC
-      LIMIT 50000 
+      -- LIMIT 50000  <-- REMOVIDO PARA PERMITIR MAIS LINHAS
     `;
     const [rows] = await pool.query(sql, [startUtc, endUtc]);
 
