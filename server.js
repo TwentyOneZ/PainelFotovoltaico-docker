@@ -35,7 +35,7 @@ const {
   MQTT_URL = 'mqtt://cerise.freeddns.org:30001',
   MQTT_USER = 'infinitwin_user',
   MQTT_PASS = 'IwtLab#2025!',
-  MQTT_PINS_TOPIC = 'iot/painel/pins',
+  MQTT_PINS_TOPIC = '/painelfotovoltaico.gerador/GPIO',
 
   // Diretório persistente para a sessão do Baileys (montado via volume)
   AUTH_DIR = '/data/baileys_auth_info',
@@ -476,16 +476,20 @@ async function startSock() {
           continue;
         }
 
-        if (cmd === '#limpezaon') {
-          const payload = JSON.stringify({ GPIO23: 'high' });
+                if (cmd === '#limpezaon') {
+          const payload = JSON.stringify({
+            thingId: GPIO_THING_ID,
+            sensorData: { GPIO23: 'high' }   // ligado
+          });
+
           mqttClient.publish(MQTT_PINS_TOPIC, payload, { qos: 1 }, async (err) => {
             if (err) {
-              logger.error(err, 'Erro ao publicar #limpezaOn');
+              logger.error({ err, topic: MQTT_PINS_TOPIC, payload }, 'Erro ao publicar #limpezaOn');
               await sock.sendMessage(remoteJid, {
                 text: '❌ Falha ao enviar comando de limpeza ON.'
               });
             } else {
-              logger.info({ topic: MQTT_PINS_TOPIC, payload }, '🧼 MQTT publicado');
+              logger.info({ topic: MQTT_PINS_TOPIC, payload }, '🧼 MQTT publicado (#limpezaon)');
               await sock.sendMessage(remoteJid, { text: '✅ Limpeza ON enviada.' });
             }
           });
@@ -493,20 +497,25 @@ async function startSock() {
         }
 
         if (cmd === '#limpezaoff') {
-          const payload = JSON.stringify({ GPIO23: 'low' });
+          const payload = JSON.stringify({
+            thingId: GPIO_THING_ID,
+            sensorData: { GPIO23: 'low' }    // desligado
+          });
+
           mqttClient.publish(MQTT_PINS_TOPIC, payload, { qos: 1 }, async (err) => {
             if (err) {
-              logger.error(err, 'Erro ao publicar #limpezaOff');
+              logger.error({ err, topic: MQTT_PINS_TOPIC, payload }, 'Erro ao publicar #limpezaOff');
               await sock.sendMessage(remoteJid, {
                 text: '❌ Falha ao enviar comando de limpeza OFF.'
               });
             } else {
-              logger.info({ topic: MQTT_PINS_TOPIC, payload }, '🧽 MQTT publicado');
+              logger.info({ topic: MQTT_PINS_TOPIC, payload }, '🧽 MQTT publicado (#limpezaoff)');
               await sock.sendMessage(remoteJid, { text: '✅ Limpeza OFF enviada.' });
             }
           });
           continue;
         }
+
       }
     }
   });

@@ -18,7 +18,7 @@ services:
       DB_NAME: painelSolar
 
       # MQTT
-      MQTT_URL: mqtt://aws21.ddns.net:1883
+      MQTT_URL: mqtt://cerise.freeddns.org:30001
       MQTT_PINS_TOPIC: iot/painel/pins
 
       # Baileys
