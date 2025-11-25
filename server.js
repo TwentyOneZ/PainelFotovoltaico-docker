@@ -52,8 +52,7 @@ const MQTT_TOPICS = [
   '/ditto/events/painelfotovoltaico.gerador/TSL2591',
   '/ditto/events/painelfotovoltaico.gerador/BMP280',
   '/ditto/events/painelfotovoltaico.gerador/AHT20',
-  '/ditto/events/painelfotovoltaico.referencia/irradiance',
-  '/ditto/events/painelfotovoltaico.referencia/estimatedPower',
+  '/ditto/events/painelfotovoltaico.referencia/esp32'
 ];
 
 const logger = P({ level: LOG_LEVEL });
