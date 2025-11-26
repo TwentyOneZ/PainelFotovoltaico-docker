@@ -21,33 +21,120 @@ const {
 
 let lastQR = null;
 
-// ====== Config por ENV (com defaults úteis) ======
-const {
-  PORT = '4000',
+// ====== Config.ini (leitura/criação) ======
+const CONFIG_INI_PATH = path.join(__dirname, 'config.ini');
 
-  DB_HOST = 'perspex.ddns.net',
-  DB_PORT = '3306',
-  DB_USER = 'root',
-  DB_PASS = 'RunicK137',
-  DB_NAME = 'painelSolar',
+const defaultIniContent = `# Configurações do painel fotovoltaico e backend
+# Gerado automaticamente se não existir.
+
+[pv]
+voc0 = 22.06
+isc0 = 0.70
+vmp0 = 18.81
+imp0 = 0.63
+alphav = -0.31        # [%/°C] - será dividido por 100 no código
+alphai = 0.06         # [%/°C] - será dividido por 100 no código
+G0 = 1000
+T0 = 25
+q = 1.602e-19
+kConst = 1.3806503e-23
+Ns = 36
+
+[app]
+PORT = 4000
+
+DB_HOST = perspex.ddns.net
+DB_PORT = 3306
+DB_USER = root
+DB_PASS = RunicK137
+DB_NAME = painelSolar
+
+MQTT_URL = mqtt://cerise.freeddns.org:30001
+MQTT_USER = infinitwin_user
+MQTT_PASS = IwtLab#2025!
+MQTT_PINS_TOPIC = /painelfotovoltaico.gerador/GPIO
+
+AUTH_DIR = /data/baileys_auth_info
+LOG_LEVEL = debug
+
+GPIO_THING_ID = painelfotovoltaico.gerador:GPIO
+MQTT_ESTIMATED_POWER_TOPIC = /painelfotovoltaico.referencia/estimatedPower
+ESTIMATED_POWER_THING_ID = painelfotovoltaico.node:estimatedPower
+`;
+
+// Cria config.ini com defaults, se não existir
+if (!fs.existsSync(CONFIG_INI_PATH)) {
+  fs.writeFileSync(CONFIG_INI_PATH, defaultIniContent, 'utf8');
+}
+
+// Parser simples de INI com seções
+function parseIni(str) {
+  const result = {};
+  let section = null;
+  const lines = str.split(/\r?\n/);
+
+  for (let line of lines) {
+    line = line.trim();
+    if (!line || line.startsWith('#') || line.startsWith(';')) continue;
+
+    if (line.startsWith('[') && line.endsWith(']')) {
+      section = line.slice(1, -1).trim();
+      if (!result[section]) result[section] = {};
+    } else {
+      const idx = line.indexOf('=');
+      if (idx === -1) continue;
+      const key = line.slice(0, idx).trim();
+      const value = line.slice(idx + 1).trim();
+      if (section) {
+        result[section][key] = value;
+      } else {
+        result[key] = value;
+      }
+    }
+  }
+  return result;
+}
+
+const iniRaw = fs.readFileSync(CONFIG_INI_PATH, 'utf8');
+const iniConfig = parseIni(iniRaw);
+const pvCfg = iniConfig.pv || {};
+const appCfg = iniConfig.app || {};
+
+const numOr = (value, fallback) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+};
+
+// ====== Config por ENV (com defaults vindos do config.ini) ======
+const {
+  PORT = appCfg.PORT || '4000',
+
+  DB_HOST = appCfg.DB_HOST || 'perspex.ddns.net',
+  DB_PORT = appCfg.DB_PORT || '3306',
+  DB_USER = appCfg.DB_USER || 'root',
+  DB_PASS = appCfg.DB_PASS || 'RunicK137',
+  DB_NAME = appCfg.DB_NAME || 'painelSolar',
 
   // broker Ditto
-  MQTT_URL = 'mqtt://cerise.freeddns.org:30001',
-  MQTT_USER = 'infinitwin_user',
-  MQTT_PASS = 'IwtLab#2025!',
-  MQTT_PINS_TOPIC = '/painelfotovoltaico.gerador/GPIO',
+  MQTT_URL = appCfg.MQTT_URL || 'mqtt://cerise.freeddns.org:30001',
+  MQTT_USER = appCfg.MQTT_USER || 'infinitwin_user',
+  MQTT_PASS = appCfg.MQTT_PASS || 'IwtLab#2025!',
+  MQTT_PINS_TOPIC = appCfg.MQTT_PINS_TOPIC || '/painelfotovoltaico.gerador/GPIO',
 
   // Diretório persistente para a sessão do Baileys (montado via volume)
-  AUTH_DIR = '/data/baileys_auth_info',
+  AUTH_DIR = appCfg.AUTH_DIR || '/data/baileys_auth_info',
 
-  LOG_LEVEL = 'debug'
+  LOG_LEVEL = appCfg.LOG_LEVEL || 'debug'
 } = process.env;
 
-const GPIO_THING_ID = 'painelfotovoltaico.gerador:GPIO';
+// Demais constantes que também podem vir do INI
+const GPIO_THING_ID = appCfg.GPIO_THING_ID || 'painelfotovoltaico.gerador:GPIO';
 
 // Tópico para publicar potência estimada (padrão Ditto)
-const MQTT_ESTIMATED_POWER_TOPIC = '/painelfotovoltaico.referencia/estimatedPower';
-const ESTIMATED_POWER_THING_ID = 'painelfotovoltaico.node:estimatedPower';
+const MQTT_ESTIMATED_POWER_TOPIC =
+  appCfg.MQTT_ESTIMATED_POWER_TOPIC || '/painelfotovoltaico.referencia/estimatedPower';
+const ESTIMATED_POWER_THING_ID =
+  appCfg.ESTIMATED_POWER_THING_ID || 'painelfotovoltaico.node:estimatedPower';
 
 // Tópicos Ditto (eventos) a serem assinados
 const MQTT_TOPICS = [
@@ -116,23 +203,25 @@ const state = {
   estimatedPower: null
 };
 
-// ====== Parâmetros do módulo FV (portados do Python) ======
-const voc0 = 22.06;
-const isc0 = 0.70;
-const vmp0 = 18.81;
-const imp0 = 0.63;
+// ====== Parâmetros do módulo FV (vindos do config.ini) ======
+const voc0 = numOr(pvCfg.voc0, 22.06);
+const isc0 = numOr(pvCfg.isc0, 0.70);
+const vmp0 = numOr(pvCfg.vmp0, 18.81);
+const imp0 = numOr(pvCfg.imp0, 0.63);
 
+// Mantemos kv e ki derivados, para evitar inconsistência se alguém mudar vmp0/voc0 no INI
 const kv = vmp0 / voc0;
 const ki = imp0 / isc0;
 
-const alphav = -0.31 / 100;
-const alphai = 0.06 / 100;
+// alphav e alphai em %/°C no INI, convertidos para fração aqui
+const alphav = numOr(pvCfg.alphav, -0.31) / 100;
+const alphai = numOr(pvCfg.alphai, 0.06) / 100;
 
-const G0 = 1000;
-const T0 = 25;
-const q = 1.602e-19;
-const kConst = 1.3806503e-23;
-const Ns = 36;
+const G0 = numOr(pvCfg.G0, 1000);
+const T0 = numOr(pvCfg.T0, 25);
+const q   = numOr(pvCfg.q, 1.602e-19);
+const kConst = numOr(pvCfg.kConst, 1.3806503e-23);
+const Ns  = numOr(pvCfg.Ns, 36);
 
 let contadorIncompleto = 0;
 
@@ -147,6 +236,7 @@ let receivedSinceLastTick = false;
  * state.irradiance (esp32 referência) e state.voltage (INA226),
  * e publica em /painelfotovoltaico.referencia/estimatedPower
  * no formato Ditto.
+ * Escala: W (V * A)
  */
 function calculateEstimatedPowerFromState() {
   const T = state.temperature;   // °C
@@ -218,7 +308,7 @@ function calculateEstimatedPowerFromState() {
 
     const i = (a * V * V + b * V + c) * u1 + (-eParam - Math.sqrt(discriminant)) / (2 * d) * u2;
 
-    const estimatedPower = V * i; // mantendo escala em Watts
+    const estimatedPower = V * i; // Watts
 
     if (!Number.isFinite(estimatedPower)) {
       logger.warn(
@@ -250,12 +340,6 @@ function calculateEstimatedPowerFromState() {
               '⚠️ Erro ao publicar potência estimada no MQTT.'
             );
           }
-          //  else {
-          //   logger.info(
-          //     { topic: MQTT_ESTIMATED_POWER_TOPIC, payload },
-          //     '🔋 Potência estimada publicada via MQTT.'
-          //   );
-          // }
         }
       );
     } else {
@@ -306,7 +390,6 @@ function initMqtt() {
     //   "sensorData":{ ... } }
     const isDittoTopic = topic.startsWith('/ditto/events/painelfotovoltaico.');
     if (!isDittoTopic) {
-      // Se quiser manter compatibilidade com antigos tópicos, pode tratar aqui
       return;
     }
 
@@ -341,14 +424,10 @@ function initMqtt() {
           break;
 
         case 'BMP280':
-          // Temos temperature + pressure aqui também, mas o schema atual só prevê 1 temperatura.
-          // Se quiser, podemos decidir usar BMP280 como fonte primária depois.
-          // Exemplo (opcional):
-          // if (typeof sensorData.temperature === 'number') state.temperature = sensorData.temperature;
+          // Podemos usar como fonte alternativa de temperatura/pressão no futuro.
           break;
 
         case 'GPIO':
-          // sensorData.GPIO23 contém 0/1 com o estado do pino (apenas logando por enquanto)
           logger.info(
             { gpio23: sensorData.GPIO23 },
             'Leitura de GPIO recebida de Ditto (não gravada no banco).'
@@ -363,8 +442,6 @@ function initMqtt() {
           break;
 
         case 'estimatedPower':
-          // Caso Ditto devolva o valor já calculado de outro lugar, poderíamos sincronizar aqui,
-          // mas como estamos calculando localmente, podemos ignorar ou só logar.
           logger.info(
             { sensorData },
             'Mensagem de estimatedPower recebida (ignorada para cálculo, pois é feito localmente).'
@@ -372,7 +449,6 @@ function initMqtt() {
           break;
 
         default:
-          // thingId que não nos interessa ainda
           logger.debug({ thingId, sensorData }, 'thingId não mapeado no handler de MQTT');
           break;
       }
