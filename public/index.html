@@ -31,6 +31,48 @@
     .msg{margin-top:12px;font-size:14px;color:#d9e2ff;background:rgba(125,160,255,0.08);border:1px solid rgba(125,160,255,0.18);padding:10px 12px;border-radius:12px;display:none}
     .msg.error{color:#ffdede;background:rgba(255,93,93,0.08);border-color:rgba(255,93,93,0.24)}
     .legend{margin-top:6px;font-size:12px;color:var(--muted)}
+    .pv-overlay{
+      position:fixed;
+      inset:0;
+      background:rgba(0,0,0,.6);
+      display:none;
+      align-items:center;
+      justify-content:center;
+      z-index:50;
+    }
+    .pv-panel{
+      background:var(--panel);
+      border-radius:18px;
+      padding:20px 24px;
+      max-width:640px;
+      width:100%;
+      box-shadow:0 20px 40px rgba(0,0,0,.45);
+      border:1px solid rgba(255,255,255,.08);
+    }
+    .pv-panel h2{
+      margin:0 0 8px;
+      font-size:18px;
+    }
+    .pv-panel p{
+      margin:0 0 16px;
+      font-size:13px;
+      color:var(--muted);
+    }
+    .pv-grid{
+      display:grid;
+      grid-template-columns:repeat(2, minmax(0,1fr));
+      gap:10px 14px;
+    }
+    @media (max-width:560px){
+      .pv-grid{grid-template-columns:1fr;}
+    }
+    .pv-actions{
+      margin-top:18px;
+      display:flex;
+      justify-content:flex-end;
+      gap:10px;
+      align-items:center;
+    }
   </style>
 </head>
 <body>
@@ -78,15 +120,81 @@
             <span class="hint" style="margin-left:8px">min</span>
           </div>
         </div>        
+    </div>
+    <div class="hint">O fuso é o do seu navegador; a API retorna ISO/UTC.</div>
+    <div id="msg" class="msg"></div>
+    <div class="chart-wrap">
+      <canvas id="chart" height="110"></canvas>
+      <div class="legend" id="legend"></div>
+    </div>
+    <!-- Botão para abrir painel de configuração do PV -->
+    <div style="margin-top:16px; text-align:right;">
+      <button id="openPvConfig" class="download-btn">Configurar PV</button>
+    </div>
+  </div> <!-- fim .container principal -->
+
+  <!-- Overlay / Painel de configuração do PV -->
+  <div id="pvConfigOverlay" class="pv-overlay">
+    <div class="pv-panel">
+      <h2>Parâmetros do Módulo FV</h2>
+      <p>Ajuste os parâmetros usados no cálculo da potência estimada.</p>
+
+      <div class="pv-grid">
+        <div>
+          <label for="pv_voc0">voc0 (V)</label>
+          <input type="number" step="0.0001" id="pv_voc0">
+        </div>
+        <div>
+          <label for="pv_isc0">isc0 (A)</label>
+          <input type="number" step="0.0001" id="pv_isc0">
+        </div>
+        <div>
+          <label for="pv_vmp0">vmp0 (V)</label>
+          <input type="number" step="0.0001" id="pv_vmp0">
+        </div>
+        <div>
+          <label for="pv_imp0">imp0 (A)</label>
+          <input type="number" step="0.0001" id="pv_imp0">
+        </div>
+        <div>
+          <label for="pv_alphav">alphav (%/°C)</label>
+          <input type="number" step="0.0001" id="pv_alphav">
+        </div>
+        <div>
+          <label for="pv_alphai">alphai (%/°C)</label>
+          <input type="number" step="0.0001" id="pv_alphai">
+        </div>
+        <div>
+          <label for="pv_G0">G0 (W/m²)</label>
+          <input type="number" step="1" id="pv_G0">
+        </div>
+        <div>
+          <label for="pv_T0">T0 (°C)</label>
+          <input type="number" step="0.01" id="pv_T0">
+        </div>
+        <div>
+          <label for="pv_q">q (C)</label>
+          <input type="number" step="1e-22" id="pv_q">
+        </div>
+        <div>
+          <label for="pv_kConst">kConst (J/K)</label>
+          <input type="number" step="1e-28" id="pv_kConst">
+        </div>
+        <div>
+          <label for="pv_Ns">Ns</label>
+          <input type="number" step="1" id="pv_Ns">
+        </div>
       </div>
-      <div class="hint">O fuso é o do seu navegador; a API retorna ISO/UTC.</div>
-      <div id="msg" class="msg"></div>
-      <div class="chart-wrap">
-        <canvas id="chart" height="110"></canvas>
-        <div class="legend" id="legend"></div>
+
+      <div id="pvConfigMsg" class="msg" style="display:none;margin-top:14px;"></div>
+
+      <div class="pv-actions">
+        <button id="savePvConfig">Alterar</button>
+        <button id="closePvConfig" class="download-btn">Fechar</button>
       </div>
     </div>
   </div>
+</div>
 
   <script>
     function $(id){ return document.getElementById(id); }
@@ -356,6 +464,92 @@
       } catch (err) {
         msg.textContent = 'Erro ao baixar dados: ' + err.message;
         msg.className = 'msg error'; msg.style.display = 'block';
+      }
+    });
+        // ==================== CONFIGURAÇÃO PV ====================
+    const PV_FIELDS = [
+      'voc0','isc0','vmp0','imp0',
+      'alphav','alphai','G0','T0','q','kConst','Ns'
+    ];
+
+    function showPvOverlay(show){
+      $('pvConfigOverlay').style.display = show ? 'flex' : 'none';
+    }
+
+    async function loadPvConfigIntoForm(){
+      const msg = $('pvConfigMsg');
+      msg.style.display = 'none';
+
+      try{
+        const res = await fetch('/api/pv-config');
+        if(!res.ok) throw new Error('Erro ao buscar configuração (HTTP ' + res.status + ')');
+        const data = await res.json();
+
+        PV_FIELDS.forEach(f => {
+          const el = $('pv_' + f);
+          if(!el) return;
+          if(data[f] !== undefined && data[f] !== null){
+            el.value = data[f];
+          } else {
+            el.value = '';
+          }
+        });
+      }catch(err){
+        msg.textContent = 'Erro ao carregar configuração: ' + err.message;
+        msg.className = 'msg error';
+        msg.style.display = 'block';
+      }
+    }
+
+    $('openPvConfig').addEventListener('click', async () => {
+      await loadPvConfigIntoForm();
+      showPvOverlay(true);
+    });
+
+    $('closePvConfig').addEventListener('click', () => {
+      showPvOverlay(false);
+    });
+
+    $('savePvConfig').addEventListener('click', async () => {
+      const msg = $('pvConfigMsg');
+      msg.style.display = 'none';
+
+      const payload = {};
+      for(const f of PV_FIELDS){
+        const el = $('pv_' + f);
+        if(!el) continue;
+        const val = el.value;
+        if(val === '') continue;
+        const num = Number(val);
+        if(!Number.isFinite(num)){
+          msg.textContent = `Valor inválido para ${f}.`;
+          msg.className = 'msg error';
+          msg.style.display = 'block';
+          return;
+        }
+        payload[f] = num;
+      }
+
+      try{
+        const res = await fetch('/api/pv-config', {
+          method: 'POST',
+          headers: { 'Content-Type':'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await res.json().catch(() => ({}));
+
+        if(!res.ok || data.error){
+          throw new Error(data.error || ('HTTP ' + res.status));
+        }
+
+        msg.textContent = 'Configuração enviada. Aguarde alguns instantes para o Ditto aplicar.';
+        msg.className = 'msg';
+        msg.style.display = 'block';
+      }catch(err){
+        msg.textContent = 'Erro ao enviar configuração: ' + err.message;
+        msg.className = 'msg error';
+        msg.style.display = 'block';
       }
     });
   </script>

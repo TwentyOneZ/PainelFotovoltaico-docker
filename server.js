@@ -59,6 +59,7 @@ LOG_LEVEL = debug
 
 GPIO_THING_ID = painelfotovoltaico.gerador:GPIO
 MQTT_ESTIMATED_POWER_TOPIC = /painelfotovoltaico.referencia/estimatedPower
+MQTT_PV_CONFIG_CMD_TOPIC = '/painelfotovoltaico.node/pvConfig';
 ESTIMATED_POWER_THING_ID = painelfotovoltaico.node:estimatedPower
 `;
 
@@ -153,6 +154,9 @@ const MQTT_ESTIMATED_POWER_TOPIC =
   appCfg.MQTT_ESTIMATED_POWER_TOPIC || '/painelfotovoltaico.referencia/estimatedPower';
 const ESTIMATED_POWER_THING_ID =
   appCfg.ESTIMATED_POWER_THING_ID || 'painelfotovoltaico.node:estimatedPower';
+const MQTT_PV_CONFIG_CMD_TOPIC = 
+  appCfg.MQTT_PV_CONFIG_CMD_TOPIC || '/painelfotovoltaico.node/pvConfig';
+
 
 // Tópicos Ditto (eventos) a serem assinados
 const MQTT_TOPICS = [
@@ -470,7 +474,7 @@ function initMqtt() {
         // ⬇️ NOVO: atualização dinâmica dos parâmetros do PV
         case 'pvConfig': {
           const logBase = {
-            namespace: 'painelFotovoltaico.node',
+            namespace: 'painelfotovoltaico.node',
             thingId: 'pvConfig'
           };
 
@@ -559,7 +563,7 @@ function initMqtt() {
               });
 
               mqttClient.publish(
-                '/ditto/events/painelFotovoltaico.node/pvConfig/log',
+                '/ditto/events/painelfotovoltaico.node/pvConfig/log',
                 logPayload,
                 { qos: 1 },
                 (err) => {
@@ -580,7 +584,7 @@ function initMqtt() {
               });
 
               mqttClient.publish(
-                '/ditto/events/painelFotovoltaico.node/pvConfig/log',
+                '/ditto/events/painelfotovoltaico.node/pvConfig/log',
                 logPayload,
                 { qos: 1 },
                 (pubErr) => {
@@ -626,6 +630,94 @@ function initMqtt() {
     }
   });
 }
+
+// ====== API PV CONFIG ======
+app.get('/api/pv-config', (req, res) => {
+  try {
+    // alphav/alphai voltam para %/°C para o frontend
+    res.json({
+      voc0,
+      isc0,
+      vmp0,
+      imp0,
+      alphav: alphav * 100,
+      alphai: alphai * 100,
+      G0,
+      T0,
+      q,
+      kConst,
+      Ns
+    });
+  } catch (err) {
+    logger.error(err, 'Erro /api/pv-config (GET)');
+    res.status(500).json({ error: 'Erro interno ao obter configuração PV.' });
+  }
+});
+
+app.post('/api/pv-config', (req, res) => {
+  const body = req.body || {};
+  const fields = [
+    'voc0',
+    'isc0',
+    'vmp0',
+    'imp0',
+    'alphav',
+    'alphai',
+    'G0',
+    'T0',
+    'q',
+    'kConst',
+    'Ns'
+  ];
+
+  const sensorData = {};
+  try {
+    for (const key of fields) {
+      if (body[key] === undefined) continue;
+      const n = Number(body[key]);
+      if (!Number.isFinite(n)) {
+        return res.status(400).json({ error: `Valor inválido para ${key}.` });
+      }
+      sensorData[key] = n;
+    }
+
+    if (Object.keys(sensorData).length === 0) {
+      return res.status(400).json({ error: 'Nenhum parâmetro fornecido.' });
+    }
+
+    if (!mqttClient || !mqttClient.connected) {
+      return res.status(503).json({ error: 'MQTT não conectado.' });
+    }
+
+    // Payload exatamente no formato pedido:
+    // {"thingId":"painelfotovoltaico.node:pvConfig","sensorData":{...}}
+    const payload = JSON.stringify({
+      thingId: 'painelfotovoltaico.node:pvConfig',
+      sensorData
+    });
+
+    mqttClient.publish(
+      MQTT_PV_CONFIG_CMD_TOPIC,
+      payload,
+      { qos: 1 },
+      (err) => {
+        if (err) {
+          logger.error({ err, payload }, 'Erro ao publicar comando pvConfig');
+          return res.status(500).json({ error: 'Falha ao publicar no MQTT.' });
+        }
+
+        // O efeito real (atualizar variáveis + config.ini + log)
+        // será realizado quando o Ditto gerar o evento
+        // /ditto/events/painelfotovoltaico.node/pvConfig,
+        // já tratado no case "pvConfig" do handler MQTT.
+        return res.json({ ok: true });
+      }
+    );
+  } catch (err) {
+    logger.error(err, 'Erro /api/pv-config (POST)');
+    res.status(500).json({ error: 'Erro interno ao processar configuração PV.' });
+  }
+});
 
 // ====== API /api/readings ======
 const ALLOWED_METRICS = new Set([
