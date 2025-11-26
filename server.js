@@ -169,11 +169,8 @@ function calculateEstimatedPowerFromState() {
     // Cálculo conforme código Python
     const Vt = (kConst * (T + 273.15)) / q;
 
-    const voc =
-      Ns * Vt * Math.log(G / G0 + 1e-9) +
-      voc0 * (1 + alphav * (T - T0));
-    const isc =
-      isc0 * (G / G0) * (1 + alphai * (T - T0));
+    const voc = Ns * Vt * Math.log(G / G0 + 1e-9) + voc0 * (1 + alphav * (T - T0));
+    const isc = isc0 * (G / G0) * (1 + alphai * (T - T0));
     const imp = isc * ki;
     const vmp = voc * kv;
 
@@ -209,38 +206,19 @@ function calculateEstimatedPowerFromState() {
       return;
     }
 
-    const a =
-      (imp / denomVocVmp2) * (voc / vmp - 2);
-    const b =
-      (-2 * vmp * imp / denomVocVmp2) * (voc / vmp - 2) -
-      imp / vmp;
-    const c =
-      (imp * voc) / vmp -
-      (voc * imp * Math.pow(voc - 2 * vmp, 2)) /
-        (vmp * denomVocVmp2);
+    const a = (imp / denomVocVmp2) * (voc / vmp - 2);
+    const b = (-2 * vmp * imp / denomVocVmp2) * (voc / vmp - 2) - imp / vmp;
+    const c = (imp * voc) / vmp - (voc * imp * Math.pow(voc - 2 * vmp, 2)) / (vmp * denomVocVmp2);
 
-    const d =
-      (-vmp * (2 * imp - isc)) /
-      (imp * denomImpIsc2);
-    const eParam =
-      (2 * vmp * (2 * imp - isc)) / denomImpIsc2 -
-      vmp / imp;
-    const f =
-      (vmp * isc * (2 * isc - 3 * imp)) /
-      denomImpIsc2;
+    const d = (-vmp * (2 * imp - isc)) / (imp * denomImpIsc2);
+    const eParam = (2 * vmp * (2 * imp - isc)) / denomImpIsc2 - vmp / imp;
+    const f = (vmp * isc * (2 * isc - 3 * imp)) / denomImpIsc2;
 
-    const discriminant = Math.max(
-      eParam * eParam - 4 * d * (f - V),
-      0
-    );
+    const discriminant = Math.max(eParam * eParam - 4 * d * (f - V), 0);
 
-    const i =
-      (a * V * V + b * V + c) * u1 +
-      (-eParam - Math.sqrt(discriminant)) /
-        (2 * d) *
-        u2;
+    const i = (a * V * V + b * V + c) * u1 + (-eParam - Math.sqrt(discriminant)) / (2 * d) * u2;
 
-    const estimatedPower = V * i * 1000; // mesma escala do Python (mW ou ajuste equivalente)
+    const estimatedPower = V * i; // mantendo escala em Watts
 
     if (!Number.isFinite(estimatedPower)) {
       logger.warn(
@@ -271,12 +249,13 @@ function calculateEstimatedPowerFromState() {
               { err, topic: MQTT_ESTIMATED_POWER_TOPIC, payload },
               '⚠️ Erro ao publicar potência estimada no MQTT.'
             );
-          } else {
-            logger.info(
-              { topic: MQTT_ESTIMATED_POWER_TOPIC, payload },
-              '🔋 Potência estimada publicada via MQTT.'
-            );
           }
+          //  else {
+          //   logger.info(
+          //     { topic: MQTT_ESTIMATED_POWER_TOPIC, payload },
+          //     '🔋 Potência estimada publicada via MQTT.'
+          //   );
+          // }
         }
       );
     } else {
