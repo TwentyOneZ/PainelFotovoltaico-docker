@@ -59,8 +59,10 @@ LOG_LEVEL = debug
 
 GPIO_THING_ID = painelfotovoltaico.gerador:GPIO
 MQTT_ESTIMATED_POWER_TOPIC = /painelfotovoltaico.referencia/estimatedPower
-MQTT_PV_CONFIG_CMD_TOPIC = '/painelfotovoltaico.node/pvConfig';
+MQTT_PV_CONFIG_CMD_TOPIC = '/painelfotovoltaico.node/pvConfig'
 ESTIMATED_POWER_THING_ID = painelfotovoltaico.node:estimatedPower
+MQTT_ALL_TOPIC = /painelfotovoltaico.node/all
+ALL_THING_ID = painelfotovoltaico.node:all
 `;
 
 // Cria config.ini com defaults, se não existir
@@ -154,9 +156,13 @@ const MQTT_ESTIMATED_POWER_TOPIC =
   appCfg.MQTT_ESTIMATED_POWER_TOPIC || '/painelfotovoltaico.referencia/estimatedPower';
 const ESTIMATED_POWER_THING_ID =
   appCfg.ESTIMATED_POWER_THING_ID || 'painelfotovoltaico.node:estimatedPower';
-const MQTT_PV_CONFIG_CMD_TOPIC = 
+const MQTT_PV_CONFIG_CMD_TOPIC =
   appCfg.MQTT_PV_CONFIG_CMD_TOPIC || '/painelfotovoltaico.node/pvConfig';
+const MQTT_ALL_TOPIC = 
+  appCfg.MQTT_ALL_TOPIC || '/painelfotovoltaico.node/all';
 
+const ALL_THING_ID = 
+  appCfg.ALL_THING_ID || 'painelfotovoltaico.node:all';
 
 // Tópicos Ditto (eventos) a serem assinados
 const MQTT_TOPICS = [
@@ -167,7 +173,7 @@ const MQTT_TOPICS = [
   '/ditto/events/painelfotovoltaico.gerador/AHT20',
   '/ditto/events/painelfotovoltaico.referencia/esp32',
   '/ditto/events/painelfotovoltaico.referencia/estimatedPower',
-  '/ditto/events/painelfotovoltaico.node/pvConfig'   // ⬅️ adicionar isto
+  '/ditto/events/painelfotovoltaico.node/pvConfig'
 ];
 
 const logger = P({ level: LOG_LEVEL });
@@ -246,7 +252,6 @@ let q      = numOr(pvCfg.q, 1.602e-19);
 let kConst = numOr(pvCfg.kConst, 1.3806503e-23);
 let Ns     = numOr(pvCfg.Ns, 36);
 
-
 let contadorIncompleto = 0;
 
 // ====== MQTT ======
@@ -254,6 +259,48 @@ let mqttClient;
 
 // flag para controlar se entrou dado no último segundo
 let receivedSinceLastTick = false;
+
+// ⬇️ NOVO: flag para saber se algum valor mudou desde o último publish /all
+let stateChangedSinceLastTick = false;
+
+/**
+ * Publica o estado agregado em /painelfotovoltaico.node/all
+ * se houve alteração em algum dos campos monitorados no último segundo.
+ */
+function publishAllIfChanged() {
+  if (!mqttClient || !mqttClient.connected) return;
+  if (!stateChangedSinceLastTick) return;
+
+  const payload = {
+    thingId: ALL_THING_ID,
+    sensorData: {
+      voltage: state.voltage,
+      current_mA: state.current_mA,
+      power_mW: state.power_mW,
+      lux: state.lux,
+      temperature: state.temperature,
+      humidity: state.humidity,
+      irradiance: state.irradiance,
+      estimatedPower: state.estimatedPower
+    }
+  };
+
+  mqttClient.publish(
+    MQTT_ALL_TOPIC,
+    JSON.stringify(payload),
+    { qos: 0 },
+    (err) => {
+      if (err) {
+        logger.error({ err, topic: MQTT_ALL_TOPIC, payload }, 'Erro ao publicar estado agregado /all');
+      } else {
+        logger.debug({ topic: MQTT_ALL_TOPIC }, 'Estado agregado /all publicado.');
+      }
+    }
+  );
+
+  // reseta flag
+  stateChangedSinceLastTick = false;
+}
 
 /**
  * Calcula a potência estimada com base em state.temperature (AHT20),
@@ -342,7 +389,11 @@ function calculateEstimatedPowerFromState() {
       return;
     }
 
-    state.estimatedPower = estimatedPower;
+    // ⬇️ Só marca mudança se o valor realmente mudou
+    if (state.estimatedPower !== estimatedPower) {
+      state.estimatedPower = estimatedPower;
+      stateChangedSinceLastTick = true;
+    }
 
     // Publica no tópico Ditto de referência
     if (mqttClient && mqttClient.connected) {
@@ -429,23 +480,55 @@ function initMqtt() {
     // Atualiza o estado em função do thingId
     try {
       switch (thingId) {
-        case 'INA226':
-          if (typeof sensorData.voltage === 'number') state.voltage = sensorData.voltage;
-          if (typeof sensorData.current === 'number') state.current_mA = sensorData.current;
-          if (typeof sensorData.power === 'number') state.power_mW = sensorData.power;
+        case 'INA226': {
+          if (typeof sensorData.voltage === 'number') {
+            if (state.voltage !== sensorData.voltage) {
+              state.voltage = sensorData.voltage;
+              stateChangedSinceLastTick = true;
+            }
+          }
+          if (typeof sensorData.current === 'number') {
+            if (state.current_mA !== sensorData.current) {
+              state.current_mA = sensorData.current;
+              stateChangedSinceLastTick = true;
+            }
+          }
+          if (typeof sensorData.power === 'number') {
+            if (state.power_mW !== sensorData.power) {
+              state.power_mW = sensorData.power;
+              stateChangedSinceLastTick = true;
+            }
+          }
           break;
+        }
 
         case 'TSL2591': {
           let lux = sensorData.lux;
           if (lux === null || lux === undefined) lux = 0;
-          if (typeof lux === 'number') state.lux = lux;
+          if (typeof lux === 'number') {
+            if (state.lux !== lux) {
+              state.lux = lux;
+              stateChangedSinceLastTick = true;
+            }
+          }
           break;
         }
 
-        case 'AHT20':
-          if (typeof sensorData.temperature === 'number') state.temperature = sensorData.temperature;
-          if (typeof sensorData.humidity === 'number') state.humidity = sensorData.humidity;
+        case 'AHT20': {
+          if (typeof sensorData.temperature === 'number') {
+            if (state.temperature !== sensorData.temperature) {
+              state.temperature = sensorData.temperature;
+              stateChangedSinceLastTick = true;
+            }
+          }
+          if (typeof sensorData.humidity === 'number') {
+            if (state.humidity !== sensorData.humidity) {
+              state.humidity = sensorData.humidity;
+              stateChangedSinceLastTick = true;
+            }
+          }
           break;
+        }
 
         case 'BMP280':
           // Podemos usar como fonte alternativa de temperatura/pressão no futuro.
@@ -460,7 +543,10 @@ function initMqtt() {
 
         case 'esp32':
           if (typeof sensorData.irradiance === 'number') {
-            state.irradiance = sensorData.irradiance;
+            if (state.irradiance !== sensorData.irradiance) {
+              state.irradiance = sensorData.irradiance;
+              stateChangedSinceLastTick = true;
+            }
           }
           break;
 
@@ -471,7 +557,7 @@ function initMqtt() {
           );
           break;
 
-        // ⬇️ NOVO: atualização dinâmica dos parâmetros do PV
+        // Atualização dinâmica dos parâmetros do PV
         case 'pvConfig': {
           const logBase = {
             namespace: 'painelfotovoltaico.node',
@@ -530,12 +616,11 @@ function initMqtt() {
             iniConfig.pv = iniConfig.pv || {};
             for (const key of fields) {
               if (updated[key] !== undefined) {
-                // No INI guardamos em string (inclui alphav/alphai em %)
                 iniConfig.pv[key] = String(updated[key]);
               }
             }
 
-            // Regrava o config.ini (dentro do container e, via volume, fora também)
+            // Regrava o config.ini
             const newIni = buildIni(iniConfig);
             fs.writeFileSync(CONFIG_INI_PATH, newIni, 'utf8');
 
@@ -689,8 +774,6 @@ app.post('/api/pv-config', (req, res) => {
       return res.status(503).json({ error: 'MQTT não conectado.' });
     }
 
-    // Payload exatamente no formato pedido:
-    // {"thingId":"painelfotovoltaico.node:pvConfig","sensorData":{...}}
     const payload = JSON.stringify({
       thingId: 'painelfotovoltaico.node:pvConfig',
       sensorData
@@ -706,10 +789,6 @@ app.post('/api/pv-config', (req, res) => {
           return res.status(500).json({ error: 'Falha ao publicar no MQTT.' });
         }
 
-        // O efeito real (atualizar variáveis + config.ini + log)
-        // será realizado quando o Ditto gerar o evento
-        // /ditto/events/painelfotovoltaico.node/pvConfig,
-        // já tratado no case "pvConfig" do handler MQTT.
         return res.json({ ok: true });
       }
     );
@@ -760,14 +839,12 @@ app.get('/api/readings', async (req, res) => {
       return res.status(400).json({ error: 'Parâmetros "start" e "end" são obrigatórios (ISO).' });
     }
 
-    // maxPoints opcional – usado só para agregação do gráfico
     const maxPoints = maxPointsRaw ? parseInt(maxPointsRaw, 10) : null;
 
     const startUtc = toMysqlDateTimeUTC(start);
     const endUtc   = toMysqlDateTimeUTC(end);
 
     if (maxPoints && Number.isFinite(maxPoints) && maxPoints > 0) {
-      // 1) Conta quantas linhas existem no intervalo
       const countSql = `
         SELECT COUNT(*) AS total
         FROM readings
@@ -778,7 +855,6 @@ app.get('/api/readings', async (req, res) => {
       const [countRows] = await pool.query(countSql, [startUtc, endUtc]);
       const totalRows = (countRows && countRows[0] && countRows[0].total) ? Number(countRows[0].total) : 0;
 
-      // Se temos poucos pontos, devolve tudo sem agregação
       if (totalRows <= maxPoints) {
         const sqlRaw = `
           SELECT ts, \`${metric}\` AS value
@@ -797,7 +873,6 @@ app.get('/api/readings', async (req, res) => {
         return res.json(data);
       }
 
-      // 2) Se tem MUITOS pontos, aí sim aplicamos agregação por bucket
       const jsStart = new Date(start);
       const jsEnd   = new Date(end);
       const totalMs = jsEnd - jsStart;
@@ -838,7 +913,6 @@ app.get('/api/readings', async (req, res) => {
       return res.json(data);
     }
 
-    // Caminho original – sem maxPoints (ou maxPoints inválido)
     const sql = `
       SELECT ts, \`${metric}\` AS value
       FROM readings
@@ -1078,6 +1152,16 @@ async function startSock() {
 (async () => {
   await initDb();
   initMqtt();
+
+  // ⬇️ Intervalo para publicar /all a cada 1 segundo, se houve mudanças
+  setInterval(() => {
+    try {
+      publishAllIfChanged();
+    } catch (err) {
+      logger.error(err, 'Erro ao publicar estado agregado /all');
+    }
+  }, 1000);
+
   startSock().catch((e) => logger.error(e, 'Erro ao iniciar WhatsApp'));
 
   app.get('/qr', async (req, res) => {
