@@ -783,19 +783,24 @@ app.get('/api/readings', async (req, res) => {
       // Agregação no MySQL: média do valor por bucket de tempo
       const sqlAgg = `
         SELECT
-          FROM_UNIXTIME(
-            FLOOR(UNIX_TIMESTAMP(CONVERT_TZ(ts, @@session.time_zone, '+00:00')) / ?) * ?
-          ) AS bucketStart,
-          AVG(\`${metric}\`) AS value
-        FROM readings
-        WHERE \`${metric}\` IS NOT NULL
-          AND CONVERT_TZ(ts, @@session.time_zone, '+00:00')
-               BETWEEN ? AND ?
-        GROUP BY FLOOR(UNIX_TIMESTAMP(CONVERT_TZ(ts, @@session.time_zone, '+00:00')) / ?)
+          bucketStart,
+          AVG(value) AS value
+        FROM (
+          SELECT
+            FROM_UNIXTIME(
+              FLOOR(UNIX_TIMESTAMP(CONVERT_TZ(ts, @@session.time_zone, '+00:00')) / ?) * ?
+            ) AS bucketStart,
+            \`${metric}\` AS value
+          FROM readings
+          WHERE \`${metric}\` IS NOT NULL
+            AND CONVERT_TZ(ts, @@session.time_zone, '+00:00')
+                BETWEEN ? AND ?
+        ) AS sub
+        GROUP BY bucketStart
         ORDER BY bucketStart ASC
       `;
 
-      const params = [bucketSec, bucketSec, startUtc, endUtc, bucketSec];
+      const params = [bucketSec, bucketSec, startUtc, endUtc];
       const [rows] = await pool.query(sqlAgg, params);
 
       const data = rows.map((r) => ({
