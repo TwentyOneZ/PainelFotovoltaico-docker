@@ -95,6 +95,24 @@ function parseIni(str) {
   return result;
 }
 
+// Gera um INI simples a partir do objeto em memória (iniConfig)
+function buildIni(obj) {
+  const lines = [
+    '# Arquivo gerado automaticamente. Edite com cuidado.',
+    ''
+  ];
+
+  for (const [sectionName, section] of Object.entries(obj)) {
+    lines.push(`[${sectionName}]`);
+    for (const [key, value] of Object.entries(section)) {
+      lines.push(`${key} = ${value}`);
+    }
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
 const iniRaw = fs.readFileSync(CONFIG_INI_PATH, 'utf8');
 const iniConfig = parseIni(iniRaw);
 const pvCfg = iniConfig.pv || {};
@@ -144,7 +162,8 @@ const MQTT_TOPICS = [
   '/ditto/events/painelfotovoltaico.gerador/BMP280',
   '/ditto/events/painelfotovoltaico.gerador/AHT20',
   '/ditto/events/painelfotovoltaico.referencia/esp32',
-  '/ditto/events/painelfotovoltaico.referencia/estimatedPower'
+  '/ditto/events/painelfotovoltaico.referencia/estimatedPower',
+  '/ditto/events/painelFotovoltaico.node/pvConfig'
 ];
 
 const logger = P({ level: LOG_LEVEL });
@@ -204,24 +223,25 @@ const state = {
 };
 
 // ====== Parâmetros do módulo FV (vindos do config.ini) ======
-const voc0 = numOr(pvCfg.voc0, 22.06);
-const isc0 = numOr(pvCfg.isc0, 0.70);
-const vmp0 = numOr(pvCfg.vmp0, 18.81);
-const imp0 = numOr(pvCfg.imp0, 0.63);
+let voc0 = numOr(pvCfg.voc0, 22.06);
+let isc0 = numOr(pvCfg.isc0, 0.70);
+let vmp0 = numOr(pvCfg.vmp0, 18.81);
+let imp0 = numOr(pvCfg.imp0, 0.63);
 
-// Mantemos kv e ki derivados, para evitar inconsistência se alguém mudar vmp0/voc0 no INI
-const kv = vmp0 / voc0;
-const ki = imp0 / isc0;
+// Mantemos kv e ki derivados
+let kv = vmp0 / voc0;
+let ki = imp0 / isc0;
 
-// alphav e alphai em %/°C no INI, convertidos para fração aqui
-const alphav = numOr(pvCfg.alphav, -0.31) / 100;
-const alphai = numOr(pvCfg.alphai, 0.06) / 100;
+// alphav e alphai em %/°C no INI, convertidos para fração
+let alphav = numOr(pvCfg.alphav, -0.31) / 100;
+let alphai = numOr(pvCfg.alphai, 0.06) / 100;
 
-const G0 = numOr(pvCfg.G0, 1000);
-const T0 = numOr(pvCfg.T0, 25);
-const q   = numOr(pvCfg.q, 1.602e-19);
-const kConst = numOr(pvCfg.kConst, 1.3806503e-23);
-const Ns  = numOr(pvCfg.Ns, 36);
+let G0     = numOr(pvCfg.G0, 1000);
+let T0     = numOr(pvCfg.T0, 25);
+let q      = numOr(pvCfg.q, 1.602e-19);
+let kConst = numOr(pvCfg.kConst, 1.3806503e-23);
+let Ns     = numOr(pvCfg.Ns, 36);
+
 
 let contadorIncompleto = 0;
 
@@ -388,7 +408,7 @@ function initMqtt() {
     // { "namespace":"painelfotovoltaico.gerador"|"painelfotovoltaico.referencia",
     //   "thingId":"INA226"|"AHT20"|"esp32"|...,
     //   "sensorData":{ ... } }
-    const isDittoTopic = topic.startsWith('/ditto/events/painelfotovoltaico.');
+    const isDittoTopic = topic.toLowerCase().startsWith('/ditto/events/painelfotovoltaico.');
     if (!isDittoTopic) {
       return;
     }
@@ -435,7 +455,6 @@ function initMqtt() {
           break;
 
         case 'esp32':
-          // Irradiância da referência
           if (typeof sensorData.irradiance === 'number') {
             state.irradiance = sensorData.irradiance;
           }
@@ -448,30 +467,160 @@ function initMqtt() {
           );
           break;
 
+        // ⬇️ NOVO: atualização dinâmica dos parâmetros do PV
+        case 'pvConfig': {
+          const logBase = {
+            namespace: 'painelFotovoltaico.node',
+            thingId: 'pvConfig'
+          };
+
+          try {
+            const fields = [
+              'voc0',
+              'isc0',
+              'vmp0',
+              'imp0',
+              'alphav',
+              'alphai',
+              'G0',
+              'T0',
+              'q',
+              'kConst',
+              'Ns'
+            ];
+
+            const updated = {};
+            for (const key of fields) {
+              if (sensorData[key] !== undefined) {
+                const n = Number(sensorData[key]);
+                if (!Number.isFinite(n)) {
+                  throw new Error(`Valor inválido para ${key}: ${sensorData[key]}`);
+                }
+                updated[key] = n;
+              }
+            }
+
+            if (Object.keys(updated).length === 0) {
+              throw new Error('Nenhum campo de PV encontrado em sensorData.');
+            }
+
+            // Atualiza variáveis em memória
+            if (updated.voc0 !== undefined) voc0 = updated.voc0;
+            if (updated.isc0 !== undefined) isc0 = updated.isc0;
+            if (updated.vmp0 !== undefined) vmp0 = updated.vmp0;
+            if (updated.imp0 !== undefined) imp0 = updated.imp0;
+
+            // Recalcula kv e ki
+            kv = vmp0 / voc0;
+            ki = imp0 / isc0;
+
+            if (updated.alphav !== undefined) alphav = updated.alphav / 100;
+            if (updated.alphai !== undefined) alphai = updated.alphai / 100;
+            if (updated.G0 !== undefined) G0 = updated.G0;
+            if (updated.T0 !== undefined) T0 = updated.T0;
+            if (updated.q !== undefined) q = updated.q;
+            if (updated.kConst !== undefined) kConst = updated.kConst;
+            if (updated.Ns !== undefined) Ns = updated.Ns;
+
+            // Atualiza objeto iniConfig.pv (será usado para regravar o INI)
+            iniConfig.pv = iniConfig.pv || {};
+            for (const key of fields) {
+              if (updated[key] !== undefined) {
+                // No INI guardamos em string (inclui alphav/alphai em %)
+                iniConfig.pv[key] = String(updated[key]);
+              }
+            }
+
+            // Regrava o config.ini (dentro do container e, via volume, fora também)
+            const newIni = buildIni(iniConfig);
+            fs.writeFileSync(CONFIG_INI_PATH, newIni, 'utf8');
+
+            logger.info({ updated }, 'Parâmetros PV atualizados via pvConfig MQTT.');
+
+            // Publica log de sucesso
+            if (mqttClient && mqttClient.connected) {
+              const logPayload = JSON.stringify({
+                ...logBase,
+                status: 'ok',
+                message: 'Parâmetros PV atualizados com sucesso.',
+                pv: {
+                  voc0,
+                  isc0,
+                  vmp0,
+                  imp0,
+                  alphav: alphav * 100, // volta para % no log
+                  alphai: alphai * 100,
+                  G0,
+                  T0,
+                  q,
+                  kConst,
+                  Ns
+                }
+              });
+
+              mqttClient.publish(
+                '/ditto/events/painelFotovoltaico.node/pvConfig/log',
+                logPayload,
+                { qos: 1 },
+                (err) => {
+                  if (err) {
+                    logger.error({ err }, 'Erro ao publicar log de pvConfig (sucesso).');
+                  }
+                }
+              );
+            }
+          } catch (err) {
+            logger.error({ err }, 'Erro ao processar pvConfig');
+
+            if (mqttClient && mqttClient.connected) {
+              const logPayload = JSON.stringify({
+                ...logBase,
+                status: 'error',
+                message: err.message || String(err)
+              });
+
+              mqttClient.publish(
+                '/ditto/events/painelFotovoltaico.node/pvConfig/log',
+                logPayload,
+                { qos: 1 },
+                (pubErr) => {
+                  if (pubErr) {
+                    logger.error({ pubErr }, 'Erro ao publicar log de pvConfig (erro).');
+                  }
+                }
+              );
+            }
+          }
+
+          // Nada para gravar no banco para pvConfig, então apenas break
+          break;
+        }
+
         default:
           logger.debug({ thingId, sensorData }, 'thingId não mapeado no handler de MQTT');
           break;
       }
 
-      // Tenta calcular e publicar a potência estimada com base no estado atual
-      calculateEstimatedPowerFromState();
+      // Tenta calcular/persistir leitura NORMAL (sensores) – não afeta pvConfig
+      if (thingId !== 'pvConfig') {
+        calculateEstimatedPowerFromState();
 
-      // Insere a linha no banco com o estado atual (apenas métricas mapeadas)
-      const insertSql = `
-        INSERT INTO readings (voltage, current_mA, power_mW, lux, temperature, humidity, irradiance, estimatedPower)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `;
-      const vals = [
-        state.voltage,
-        state.current_mA,
-        state.power_mW,
-        state.lux === null ? 0 : state.lux,
-        state.temperature,
-        state.humidity,
-        state.irradiance,
-        state.estimatedPower
-      ];
-      await pool.query(insertSql, vals);
+        const insertSql = `
+          INSERT INTO readings (voltage, current_mA, power_mW, lux, temperature, humidity, irradiance, estimatedPower)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `;
+        const vals = [
+          state.voltage,
+          state.current_mA,
+          state.power_mW,
+          state.lux === null ? 0 : state.lux,
+          state.temperature,
+          state.humidity,
+          state.irradiance,
+          state.estimatedPower
+        ];
+        await pool.query(insertSql, vals);
+      }
     } catch (e) {
       logger.error(e, 'Erro ao processar/inserir leitura MQTT (Ditto)');
     }

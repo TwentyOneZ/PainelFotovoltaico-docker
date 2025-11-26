@@ -28,6 +28,7 @@ services:
       - ./data:/data                    # sessão do WhatsApp fica em ./data/baileys_auth_info
       - ./public:/app/public            # (dev) editar HTML
       - ./server.js:/app/server.js      # (dev) hot-reload manual (reiniciar container)
+      - ./config.ini:/app/config.ini # ⬅ monta o config.ini da raiz do projeto
     depends_on:
       - mysql
 
