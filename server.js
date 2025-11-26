@@ -766,9 +766,38 @@ app.get('/api/readings', async (req, res) => {
     const startUtc = toMysqlDateTimeUTC(start);
     const endUtc   = toMysqlDateTimeUTC(end);
 
-    // Se maxPoints foi informado e é válido, usamos agregação em buckets de tempo
     if (maxPoints && Number.isFinite(maxPoints) && maxPoints > 0) {
-      // Calcula o tamanho do bucket em segundos com base no intervalo
+      // 1) Conta quantas linhas existem no intervalo
+      const countSql = `
+        SELECT COUNT(*) AS total
+        FROM readings
+        WHERE \`${metric}\` IS NOT NULL
+          AND CONVERT_TZ(ts, @@session.time_zone, '+00:00')
+               BETWEEN ? AND ?
+      `;
+      const [countRows] = await pool.query(countSql, [startUtc, endUtc]);
+      const totalRows = (countRows && countRows[0] && countRows[0].total) ? Number(countRows[0].total) : 0;
+
+      // Se temos poucos pontos, devolve tudo sem agregação
+      if (totalRows <= maxPoints) {
+        const sqlRaw = `
+          SELECT ts, \`${metric}\` AS value
+          FROM readings
+          WHERE \`${metric}\` IS NOT NULL
+            AND CONVERT_TZ(ts, @@session.time_zone, '+00:00')
+                 BETWEEN ? AND ?
+          ORDER BY ts ASC
+        `;
+        const [rows] = await pool.query(sqlRaw, [startUtc, endUtc]);
+
+        const data = rows.map((r) => ({
+          ts: new Date(r.ts).toISOString(),
+          [metric]: r.value !== null ? Number(r.value) : null
+        }));
+        return res.json(data);
+      }
+
+      // 2) Se tem MUITOS pontos, aí sim aplicamos agregação por bucket
       const jsStart = new Date(start);
       const jsEnd   = new Date(end);
       const totalMs = jsEnd - jsStart;
@@ -780,7 +809,6 @@ app.get('/api/readings', async (req, res) => {
       const totalSec  = Math.max(1, Math.floor(totalMs / 1000));
       const bucketSec = Math.max(1, Math.floor(totalSec / maxPoints));
 
-      // Agregação no MySQL: média do valor por bucket de tempo
       const sqlAgg = `
         SELECT
           bucketStart,
@@ -794,7 +822,7 @@ app.get('/api/readings', async (req, res) => {
           FROM readings
           WHERE \`${metric}\` IS NOT NULL
             AND CONVERT_TZ(ts, @@session.time_zone, '+00:00')
-                BETWEEN ? AND ?
+                 BETWEEN ? AND ?
         ) AS sub
         GROUP BY bucketStart
         ORDER BY bucketStart ASC
@@ -807,11 +835,10 @@ app.get('/api/readings', async (req, res) => {
         ts: new Date(r.bucketStart).toISOString(),
         [metric]: r.value !== null ? Number(r.value) : null
       }));
-
       return res.json(data);
     }
 
-    // Caminho original – sem agregação (mantém LIMIT 50000)
+    // Caminho original – sem maxPoints (ou maxPoints inválido)
     const sql = `
       SELECT ts, \`${metric}\` AS value
       FROM readings

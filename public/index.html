@@ -110,7 +110,7 @@
           <div class="actions">
             <input type="time" id="endTime" step="60" style="flex:1" />
             <button id="run">Exibir gráfico</button>
-            <button id="resetZoom" class="download-btn">Resetar zoom</button>
+            <!-- <button id="resetZoom" class="download-btn">Resetar zoom</button> -->
             <button id="downloadCsv" class="download-btn">Baixar CSV</button> </div>
           </div>
         </div>
@@ -278,14 +278,14 @@
       return chart;
     }
 
-    // Botão para resetar o zoom do gráfico
-    $('resetZoom').addEventListener('click', () => {
-      const c = ensureChart();
-      if (c && typeof c.resetZoom === 'function') {
-        c.resetZoom();
-      }
-    });
-    
+    // // Botão para resetar o zoom do gráfico
+    // $('resetZoom').addEventListener('click', () => {
+    //   const c = ensureChart();
+    //   if (c && typeof c.resetZoom === 'function') {
+    //     c.resetZoom();
+    //   }
+    // });
+
     const API_URL = '/api/readings';
     const MAX_POINTS = 2000; // máx. de pontos por série no gráfico
 
