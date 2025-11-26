@@ -163,7 +163,7 @@ const MQTT_TOPICS = [
   '/ditto/events/painelfotovoltaico.gerador/AHT20',
   '/ditto/events/painelfotovoltaico.referencia/esp32',
   '/ditto/events/painelfotovoltaico.referencia/estimatedPower',
-  '/ditto/events/painelFotovoltaico.node/pvConfig'
+  '/ditto/events/painelfotovoltaico.node/pvConfig'   // ⬅️ adicionar isto
 ];
 
 const logger = P({ level: LOG_LEVEL });
