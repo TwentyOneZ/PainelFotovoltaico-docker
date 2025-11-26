@@ -43,7 +43,7 @@ Ns = 36
 [app]
 PORT = 4000
 
-DB_HOST = perspex.ddns.net
+DB_HOST = painel-mysql
 DB_PORT = 3306
 DB_USER = root
 DB_PASS = RunicK137
