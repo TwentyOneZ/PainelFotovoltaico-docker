@@ -6,6 +6,7 @@
   <title>Gráfico do Painel Solar</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.umd.min.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -109,6 +110,7 @@
           <div class="actions">
             <input type="time" id="endTime" step="60" style="flex:1" />
             <button id="run">Exibir gráfico</button>
+            <button id="resetZoom" class="download-btn">Resetar zoom</button>
             <button id="downloadCsv" class="download-btn">Baixar CSV</button> </div>
           </div>
         </div>
@@ -241,15 +243,34 @@
             }
           ]
         },
-        options: {
+                options: {
           responsive: true,
           scales: {
-            x: { type: 'time',
-                time: { displayFormats: { minute: 'HH:mm', hour: 'HH:mm', day: 'dd/MM HH:mm' } },
-                ticks: { maxRotation: 0 } },
+            x: {
+              type: 'time',
+              time: { displayFormats: { minute: 'HH:mm', hour: 'HH:mm', day: 'dd/MM HH:mm' } },
+              ticks: { maxRotation: 0 }
+            },
             y: { beginAtZero: false }
           },
-          plugins: { legend: { display: true }, tooltip: { intersect: false, mode: 'index' } },
+          plugins: {
+            legend: { display: true },
+            tooltip: { intersect: false, mode: 'index' },
+            zoom: {
+              pan: {
+                enabled: true,
+                mode: 'x'
+              },
+              zoom: {
+                wheel: { enabled: true },   // zoom com scroll do mouse
+                pinch: { enabled: true },   // zoom com gesto em touch
+                mode: 'x'
+              },
+              limits: {
+                x: { min: 'original', max: 'original' }
+              }
+            }
+          },
           interaction: { intersect: false, mode: 'nearest' },
           spanGaps: true
         }
@@ -257,18 +278,29 @@
       return chart;
     }
 
-
+    // Botão para resetar o zoom do gráfico
+    $('resetZoom').addEventListener('click', () => {
+      const c = ensureChart();
+      if (c && typeof c.resetZoom === 'function') {
+        c.resetZoom();
+      }
+    });
+    
     const API_URL = '/api/readings';
+    const MAX_POINTS = 2000; // máx. de pontos por série no gráfico
 
     async function fetchReadings(metric, startISO, endISO) {
       const url = new URL(API_URL, window.location.origin);
       url.searchParams.set('metric', metric);
       url.searchParams.set('start', startISO);
       url.searchParams.set('end', endISO);
+      url.searchParams.set('maxPoints', String(MAX_POINTS)); // pede agregação
+
       const res = await fetch(url.toString());
       if (!res.ok) throw new Error('Erro na API: ' + res.status);
       return res.json();
     }
+
 
     function toISO(dateStr, timeStr){
       const [y,m,d] = dateStr.split('-').map(Number);
