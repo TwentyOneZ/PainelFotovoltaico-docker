@@ -31,7 +31,7 @@ const {
   DB_PASS = 'RunicK137',
   DB_NAME = 'painelSolar',
 
-  // NOVO: broker Ditto
+  // broker Ditto
   MQTT_URL = 'mqtt://cerise.freeddns.org:30001',
   MQTT_USER = 'infinitwin_user',
   MQTT_PASS = 'IwtLab#2025!',
@@ -45,6 +45,10 @@ const {
 
 const GPIO_THING_ID = 'painelfotovoltaico.gerador:GPIO';
 
+// Tópico para publicar potência estimada (padrão Ditto)
+const MQTT_ESTIMATED_POWER_TOPIC = '/painelfotovoltaico.referencia/estimatedPower';
+const ESTIMATED_POWER_THING_ID = 'painelfotovoltaico.node:estimatedPower';
+
 // Tópicos Ditto (eventos) a serem assinados
 const MQTT_TOPICS = [
   '/ditto/events/painelfotovoltaico.gerador/GPIO',
@@ -52,7 +56,8 @@ const MQTT_TOPICS = [
   '/ditto/events/painelfotovoltaico.gerador/TSL2591',
   '/ditto/events/painelfotovoltaico.gerador/BMP280',
   '/ditto/events/painelfotovoltaico.gerador/AHT20',
-  '/ditto/events/painelfotovoltaico.referencia/esp32'
+  '/ditto/events/painelfotovoltaico.referencia/esp32',
+  '/ditto/events/painelfotovoltaico.referencia/estimatedPower'
 ];
 
 const logger = P({ level: LOG_LEVEL });
@@ -105,17 +110,188 @@ const state = {
   current_mA: null,
   power_mW: null,
   lux: null,
-  temperature: null,
+  temperature: null,     // AHT20
   humidity: null,
-  irradiance: null,
+  irradiance: null,      // referência (esp32)
   estimatedPower: null
 };
+
+// ====== Parâmetros do módulo FV (portados do Python) ======
+const voc0 = 22.06;
+const isc0 = 0.70;
+const vmp0 = 18.81;
+const imp0 = 0.63;
+
+const kv = vmp0 / voc0;
+const ki = imp0 / isc0;
+
+const alphav = -0.31 / 100;
+const alphai = 0.06 / 100;
+
+const G0 = 1000;
+const T0 = 25;
+const q = 1.602e-19;
+const kConst = 1.3806503e-23;
+const Ns = 36;
+
+let contadorIncompleto = 0;
 
 // ====== MQTT ======
 let mqttClient;
 
 // flag para controlar se entrou dado no último segundo
 let receivedSinceLastTick = false;
+
+/**
+ * Calcula a potência estimada com base em state.temperature (AHT20),
+ * state.irradiance (esp32 referência) e state.voltage (INA226),
+ * e publica em /painelfotovoltaico.referencia/estimatedPower
+ * no formato Ditto.
+ */
+function calculateEstimatedPowerFromState() {
+  const T = state.temperature;   // °C
+  let G = state.irradiance;      // W/m²
+  const V = state.voltage;       // V
+
+  if (T == null || G == null || V == null) {
+    contadorIncompleto += 1;
+    logger.debug(
+      { contadorIncompleto, T, G, V },
+      '⚠️ Dados incompletos para calcular potência estimada.'
+    );
+    return;
+  }
+
+  try {
+    // Corrige valor de G caso seja negativo
+    G = Math.max(G, 0);
+
+    // Cálculo conforme código Python
+    const Vt = (kConst * (T + 273.15)) / q;
+
+    const voc =
+      Ns * Vt * Math.log(G / G0 + 1e-9) +
+      voc0 * (1 + alphav * (T - T0));
+    const isc =
+      isc0 * (G / G0) * (1 + alphai * (T - T0));
+    const imp = isc * ki;
+    const vmp = voc * kv;
+
+    // Função degrau unitário
+    let u1, u2;
+    if (V - vmp < 0) {
+      u1 = 0;
+      u2 = 1;
+    } else if (V - vmp > 0) {
+      u1 = 1;
+      u2 = 0;
+    } else {
+      u1 = 0.5;
+      u2 = 0.5;
+    }
+
+    // Parâmetros modelo gêmeo digital PV
+    const denomVocVmp2 = Math.pow(voc - vmp, 2);
+    const denomImpIsc2 = Math.pow(imp - isc, 2);
+
+    if (denomVocVmp2 === 0 || denomImpIsc2 === 0 || imp === 0) {
+      logger.warn(
+        {
+          voc,
+          vmp,
+          isc,
+          imp,
+          denomVocVmp2,
+          denomImpIsc2
+        },
+        '⚠️ Denominador zero no cálculo da potência estimada; pulando.'
+      );
+      return;
+    }
+
+    const a =
+      (imp / denomVocVmp2) * (voc / vmp - 2);
+    const b =
+      (-2 * vmp * imp / denomVocVmp2) * (voc / vmp - 2) -
+      imp / vmp;
+    const c =
+      (imp * voc) / vmp -
+      (voc * imp * Math.pow(voc - 2 * vmp, 2)) /
+        (vmp * denomVocVmp2);
+
+    const d =
+      (-vmp * (2 * imp - isc)) /
+      (imp * denomImpIsc2);
+    const eParam =
+      (2 * vmp * (2 * imp - isc)) / denomImpIsc2 -
+      vmp / imp;
+    const f =
+      (vmp * isc * (2 * isc - 3 * imp)) /
+      denomImpIsc2;
+
+    const discriminant = Math.max(
+      eParam * eParam - 4 * d * (f - V),
+      0
+    );
+
+    const i =
+      (a * V * V + b * V + c) * u1 +
+      (-eParam - Math.sqrt(discriminant)) /
+        (2 * d) *
+        u2;
+
+    const estimatedPower = V * i * 1000; // mesma escala do Python (mW ou ajuste equivalente)
+
+    if (!Number.isFinite(estimatedPower)) {
+      logger.warn(
+        { estimatedPower, V, i },
+        '⚠️ Potência estimada não finita; não será publicada.'
+      );
+      return;
+    }
+
+    state.estimatedPower = estimatedPower;
+
+    // Publica no tópico Ditto de referência
+    if (mqttClient && mqttClient.connected) {
+      const payload = JSON.stringify({
+        thingId: ESTIMATED_POWER_THING_ID,
+        sensorData: {
+          estimatedPower: Number(estimatedPower.toFixed(3))
+        }
+      });
+
+      mqttClient.publish(
+        MQTT_ESTIMATED_POWER_TOPIC,
+        payload,
+        { qos: 1 },
+        (err) => {
+          if (err) {
+            logger.error(
+              { err, topic: MQTT_ESTIMATED_POWER_TOPIC, payload },
+              '⚠️ Erro ao publicar potência estimada no MQTT.'
+            );
+          } else {
+            logger.info(
+              { topic: MQTT_ESTIMATED_POWER_TOPIC, payload },
+              '🔋 Potência estimada publicada via MQTT.'
+            );
+          }
+        }
+      );
+    } else {
+      logger.warn(
+        { connected: mqttClient && mqttClient.connected },
+        '⚠️ MQTT não conectado; não foi possível publicar estimatedPower.'
+      );
+    }
+  } catch (ex) {
+    logger.error(
+      { err: ex },
+      '⚠️ Erro no cálculo da potência estimada.'
+    );
+  }
+}
 
 function initMqtt() {
   mqttClient = mqtt.connect(MQTT_URL, {
@@ -129,24 +305,6 @@ function initMqtt() {
       if (err) logger.error(err, 'Erro ao assinar tópicos MQTT');
       else logger.info({ topics: MQTT_TOPICS }, '📥 Inscrito nos tópicos Ditto');
     });
-
-    // // Publica o estado consolidado apenas se houve dados no último segundo
-    // const ALL_IN_ONE_TOPIC = 'iot/painel/all';
-    // setInterval(() => {
-    //   if (mqttClient.connected && receivedSinceLastTick) {
-    //     const payload = JSON.stringify(state);
-    //     mqttClient.publish(ALL_IN_ONE_TOPIC, payload, { qos: 0 }, (err) => {
-    //       if (err) {
-    //         logger.error({ err, topic: ALL_IN_ONE_TOPIC }, 'Erro ao publicar no tópico consolidado');
-    //       }
-    //     });
-    //   }
-    //   receivedSinceLastTick = false;
-    // }, 1000);
-
-    // logger.info(
-    //   `📢 Publicando estado consolidado em "${ALL_IN_ONE_TOPIC}" apenas quando houver novas leituras no último segundo.`
-    // );
   });
 
   mqttClient.on('error', (err) => {
@@ -164,10 +322,10 @@ function initMqtt() {
     }
 
     // Esperamos o formato Ditto:
-    // { "namespace":"painelfotovoltaico.gerador",
-    //   "thingId":"INA226",
+    // { "namespace":"painelfotovoltaico.gerador"|"painelfotovoltaico.referencia",
+    //   "thingId":"INA226"|"AHT20"|"esp32"|...,
     //   "sensorData":{ ... } }
-    const isDittoTopic = topic.startsWith('/ditto/events/painelfotovoltaico.gerador/');
+    const isDittoTopic = topic.startsWith('/ditto/events/painelfotovoltaico.');
     if (!isDittoTopic) {
       // Se quiser manter compatibilidade com antigos tópicos, pode tratar aqui
       return;
@@ -195,7 +353,6 @@ function initMqtt() {
           let lux = sensorData.lux;
           if (lux === null || lux === undefined) lux = 0;
           if (typeof lux === 'number') state.lux = lux;
-          // visible / infrared estão disponíveis, mas não temos colunas no momento
           break;
         }
 
@@ -205,11 +362,10 @@ function initMqtt() {
           break;
 
         case 'BMP280':
-          // temos temperature + pressure aqui também, mas o schema atual só prevê 1 temperatura.
+          // Temos temperature + pressure aqui também, mas o schema atual só prevê 1 temperatura.
           // Se quiser, podemos decidir usar BMP280 como fonte primária depois.
           // Exemplo (opcional):
           // if (typeof sensorData.temperature === 'number') state.temperature = sensorData.temperature;
-          // pressure não tem coluna correspondente na tabela
           break;
 
         case 'GPIO':
@@ -220,10 +376,30 @@ function initMqtt() {
           );
           break;
 
+        case 'esp32':
+          // Irradiância da referência
+          if (typeof sensorData.irradiance === 'number') {
+            state.irradiance = sensorData.irradiance;
+          }
+          break;
+
+        case 'estimatedPower':
+          // Caso Ditto devolva o valor já calculado de outro lugar, poderíamos sincronizar aqui,
+          // mas como estamos calculando localmente, podemos ignorar ou só logar.
+          logger.info(
+            { sensorData },
+            'Mensagem de estimatedPower recebida (ignorada para cálculo, pois é feito localmente).'
+          );
+          break;
+
         default:
           // thingId que não nos interessa ainda
-          return;
+          logger.debug({ thingId, sensorData }, 'thingId não mapeado no handler de MQTT');
+          break;
       }
+
+      // Tenta calcular e publicar a potência estimada com base no estado atual
+      calculateEstimatedPowerFromState();
 
       // Insere a linha no banco com o estado atual (apenas métricas mapeadas)
       const insertSql = `
@@ -331,7 +507,6 @@ app.get('/api/download', async (req, res) => {
       WHERE CONVERT_TZ(ts, @@session.time_zone, '+00:00')
              BETWEEN ? AND ?
       ORDER BY ts ASC
-      -- LIMIT 50000  <-- REMOVIDO PARA PERMITIR MAIS LINHAS
     `;
     const [rows] = await pool.query(sql, [startUtc, endUtc]);
 
@@ -479,7 +654,7 @@ async function startSock() {
           continue;
         }
 
-                if (cmd === '#limpezaon') {
+        if (cmd === '#limpezaon') {
           const payload = JSON.stringify({
             thingId: GPIO_THING_ID,
             sensorData: { GPIO23: 'high' }   // ligado
