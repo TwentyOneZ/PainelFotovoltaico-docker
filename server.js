@@ -189,6 +189,10 @@ app.use(express.static(path.join(__dirname, 'public')));
 // ====== Variável global para gravação de falha ======
 let falhaState = 0;
 
+// ====== SISTEMA DE BUFFER DE GRAVAÇÃO ======
+const insertBuffer = [];
+const BUFFER_INTERVAL_MS = 5000; // Salva o lote no banco de dados a cada 5 segundos
+
 // ====== MySQL (pool) ======
 let pool;
 async function initDb() {
@@ -239,6 +243,26 @@ async function initDb() {
   }
 
   logger.info('🗄️  Tabela "readings" pronta.');
+
+  // Inicia o processo de salvamento em lote (Batch Insert) do Buffer
+  setInterval(async () => {
+    if (insertBuffer.length === 0) return;
+    
+    // Extrai e limpa tudo que entrou no buffer nos ultimos 5 segundos
+    const batchData = insertBuffer.splice(0, insertBuffer.length);
+    
+    try {
+      const sql = `
+        INSERT INTO readings (ts, voltage, current_mA, power_mW, lux, temperature, humidity, irradiance, estimatedPower, falha)
+        VALUES ?
+      `;
+      // O mysql2 aceita um array de arrays para inserções em lote de uma só vez
+      await pool.query(sql, [batchData]);
+      logger.debug(`Gravou lote de ${batchData.length} leituras no banco.`);
+    } catch(err) {
+      logger.error(err, 'Erro ao gravar buffer em lote no banco');
+    }
+  }, BUFFER_INTERVAL_MS);
 }
 
 // ====== Estado atual (últimos valores) ======
@@ -659,11 +683,10 @@ function initMqtt() {
       if (thingId !== 'pvConfig') {
         calculateEstimatedPowerFromState();
 
-        const insertSql = `
-          INSERT INTO readings (voltage, current_mA, power_mW, lux, temperature, humidity, irradiance, estimatedPower, falha)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `;
-        const vals = [
+        // Em vez de fazer uma transação nova no banco a cada 1 segundo, 
+        // guardamos na memória RAM e um intervalo limpa e salva a cada 5s.
+        insertBuffer.push([
+          new Date(), // ts - Capturamos a hora exata da chegada do dado!
           state.voltage,
           state.current_mA,
           state.power_mW,
@@ -673,8 +696,7 @@ function initMqtt() {
           state.irradiance,
           state.estimatedPower,
           falhaState
-        ];
-        await pool.query(insertSql, vals);
+        ]);
       }
     } catch (e) {
       logger.error(e, 'Erro ao processar/inserir leitura MQTT (Ditto)');
@@ -813,16 +835,21 @@ app.get('/api/readings', async (req, res) => {
 
     const maxPoints = maxPointsRaw ? parseInt(maxPointsRaw, 10) : null;
 
+    // Os parâmetros em string formatados como UTC (YYYY-MM-DD HH:mm:ss)
     const startUtc = toMysqlDateTimeUTC(start);
     const endUtc   = toMysqlDateTimeUTC(end);
+
+    // OTIMIZAÇÃO CRÍTICA DO SELECT:
+    // Convertemos a variável do node (startUtc) para o fuso do banco usando CONVERT_TZ(?), 
+    // em vez de converter a coluna ts. Isso permite o banco usar o índice 'idx_ts' instantaneamente.
 
     if (maxPoints && Number.isFinite(maxPoints) && maxPoints > 0) {
       const countSql = `
         SELECT COUNT(*) AS total
         FROM readings
         WHERE \`${metric}\` IS NOT NULL
-          AND CONVERT_TZ(ts, @@session.time_zone, '+00:00')
-               BETWEEN ? AND ?
+          AND ts BETWEEN CONVERT_TZ(?, '+00:00', @@session.time_zone)
+                     AND CONVERT_TZ(?, '+00:00', @@session.time_zone)
       `;
       const [countRows] = await pool.query(countSql, [startUtc, endUtc]);
       const totalRows = (countRows && countRows[0] && countRows[0].total) ? Number(countRows[0].total) : 0;
@@ -832,8 +859,8 @@ app.get('/api/readings', async (req, res) => {
           SELECT ts, \`${metric}\` AS value
           FROM readings
           WHERE \`${metric}\` IS NOT NULL
-            AND CONVERT_TZ(ts, @@session.time_zone, '+00:00')
-                 BETWEEN ? AND ?
+            AND ts BETWEEN CONVERT_TZ(?, '+00:00', @@session.time_zone)
+                       AND CONVERT_TZ(?, '+00:00', @@session.time_zone)
           ORDER BY ts ASC
         `;
         const [rows] = await pool.query(sqlRaw, [startUtc, endUtc]);
@@ -868,8 +895,8 @@ app.get('/api/readings', async (req, res) => {
             \`${metric}\` AS value
           FROM readings
           WHERE \`${metric}\` IS NOT NULL
-            AND CONVERT_TZ(ts, @@session.time_zone, '+00:00')
-                 BETWEEN ? AND ?
+            AND ts BETWEEN CONVERT_TZ(?, '+00:00', @@session.time_zone)
+                       AND CONVERT_TZ(?, '+00:00', @@session.time_zone)
         ) AS sub
         GROUP BY bucketStart
         ORDER BY bucketStart ASC
@@ -889,8 +916,8 @@ app.get('/api/readings', async (req, res) => {
       SELECT ts, \`${metric}\` AS value
       FROM readings
       WHERE \`${metric}\` IS NOT NULL
-        AND CONVERT_TZ(ts, @@session.time_zone, '+00:00')
-             BETWEEN ? AND ?
+        AND ts BETWEEN CONVERT_TZ(?, '+00:00', @@session.time_zone)
+                   AND CONVERT_TZ(?, '+00:00', @@session.time_zone)
       ORDER BY ts ASC
       LIMIT 50000
     `;
@@ -920,11 +947,13 @@ app.get('/api/download', async (req, res) => {
     const endUtc = toMysqlDateTimeUTC(end);
 
     const columns = ['ts'].concat(ALL_METRICS).map((col) => `\`${col}\``).join(', ');
+    
+    // OTIMIZAÇÃO DOWNLOAD (Uso do Índice)
     const sql = `
       SELECT ${columns}
       FROM readings
-      WHERE CONVERT_TZ(ts, @@session.time_zone, '+00:00')
-             BETWEEN ? AND ?
+      WHERE ts BETWEEN CONVERT_TZ(?, '+00:00', @@session.time_zone)
+                   AND CONVERT_TZ(?, '+00:00', @@session.time_zone)
       ORDER BY ts ASC
     `;
     const [rows] = await pool.query(sql, [startUtc, endUtc]);
