@@ -333,10 +333,6 @@
             if (y === null || y === undefined) return null;
             let num = Number(y);
             if (!Number.isFinite(num)) return null;
-            // Converte a unidade original do gráfico para W
-            if (metric === 'power_mW') {
-                num = num / 1000;
-            }
             const localDate = new Date(p.ts);
             return { x: localDate, y: num };
         }).filter(Boolean);
