@@ -1062,7 +1062,7 @@ async function startSock() {
                 `Umidade: ${fmt(r.humidity, ' %')}`,
                 `Irradiância: ${fmt(r.irradiance, ' W/m²')}`,
                 `Pot. Estimada: ${fmt(r.estimatedPower, ' W')}`,
-                `Falha: ${r.falha ? 'Ativada (1)' : 'Desativada (0)'}`
+                `Falha: ${r.falha ? 'Ativada' : 'Desativada'}`
               ].join('\n')
             );
 
