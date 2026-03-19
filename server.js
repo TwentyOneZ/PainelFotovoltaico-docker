@@ -186,6 +186,9 @@ app.use(express.json());
 // Serve a pasta pública (HTML, JS, CSS)
 app.use(express.static(path.join(__dirname, 'public')));
 
+// ====== Variável global para gravação de falha ======
+let falhaState = 0;
+
 // ====== MySQL (pool) ======
 let pool;
 async function initDb() {
@@ -217,6 +220,24 @@ async function initDb() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `;
   await pool.query(createSql);
+  
+  // Garante a existência da coluna "falha"
+  try {
+    await pool.query('ALTER TABLE readings ADD COLUMN falha TINYINT(1) DEFAULT 0');
+  } catch (err) {
+    if (err.code !== 'ER_DUP_FIELDNAME') {
+      logger.error(err, 'Erro ao adicionar coluna falha');
+    }
+  }
+
+  // Inicializa o falhaState a partir do banco de dados na inicialização
+  try {
+    const [rows] = await pool.query('SELECT falha FROM readings ORDER BY ts DESC LIMIT 1');
+    if (rows.length) falhaState = rows[0].falha || 0;
+  } catch (e) {
+    logger.error(e, 'Erro ao carregar estado inicial de falha');
+  }
+
   logger.info('🗄️  Tabela "readings" pronta.');
 }
 
@@ -260,13 +281,9 @@ let mqttClient;
 // flag para controlar se entrou dado no último segundo
 let receivedSinceLastTick = false;
 
-// ⬇️ NOVO: flag para saber se algum valor mudou desde o último publish /all
+// flag para saber se algum valor mudou desde o último publish /all
 let stateChangedSinceLastTick = false;
 
-/**
- * Publica o estado agregado em /painelfotovoltaico.node/all
- * se houve alteração em algum dos campos monitorados no último segundo.
- */
 function publishAllIfChanged() {
   if (!mqttClient || !mqttClient.connected) return;
   if (!stateChangedSinceLastTick) return;
@@ -298,17 +315,9 @@ function publishAllIfChanged() {
     }
   );
 
-  // reseta flag
   stateChangedSinceLastTick = false;
 }
 
-/**
- * Calcula a potência estimada com base em state.temperature (AHT20),
- * state.irradiance (esp32 referência) e state.voltage (INA226),
- * e publica em /painelfotovoltaico.referencia/estimatedPower
- * no formato Ditto.
- * Escala: W (V * A)
- */
 function calculateEstimatedPowerFromState() {
   const T = state.temperature;   // °C
   let G = state.irradiance;      // W/m²
@@ -324,10 +333,8 @@ function calculateEstimatedPowerFromState() {
   }
 
   try {
-    // Corrige valor de G caso seja negativo
     G = Math.max(G, 0);
 
-    // Cálculo conforme código Python
     const Vt = (kConst * (T + 273.15)) / q;
 
     const voc = Ns * Vt * Math.log(G / G0 + 1e-9) + voc0 * (1 + alphav * (T - T0));
@@ -335,7 +342,6 @@ function calculateEstimatedPowerFromState() {
     const imp = isc * ki;
     const vmp = voc * kv;
 
-    // Função degrau unitário
     let u1, u2;
     if (V - vmp < 0) {
       u1 = 0;
@@ -348,20 +354,12 @@ function calculateEstimatedPowerFromState() {
       u2 = 0.5;
     }
 
-    // Parâmetros modelo gêmeo digital PV
     const denomVocVmp2 = Math.pow(voc - vmp, 2);
     const denomImpIsc2 = Math.pow(imp - isc, 2);
 
     if (denomVocVmp2 === 0 || denomImpIsc2 === 0 || imp === 0) {
       logger.warn(
-        {
-          voc,
-          vmp,
-          isc,
-          imp,
-          denomVocVmp2,
-          denomImpIsc2
-        },
+        { voc, vmp, isc, imp, denomVocVmp2, denomImpIsc2 },
         '⚠️ Denominador zero no cálculo da potência estimada; pulando.'
       );
       return;
@@ -389,13 +387,11 @@ function calculateEstimatedPowerFromState() {
       return;
     }
 
-    // ⬇️ Só marca mudança se o valor realmente mudou
     if (state.estimatedPower !== estimatedPower) {
       state.estimatedPower = estimatedPower;
       stateChangedSinceLastTick = true;
     }
 
-    // Publica no tópico Ditto de referência
     if (mqttClient && mqttClient.connected) {
       const payload = JSON.stringify({
         thingId: ESTIMATED_POWER_THING_ID,
@@ -459,10 +455,6 @@ function initMqtt() {
       return;
     }
 
-    // Esperamos o formato Ditto:
-    // { "namespace":"painelfotovoltaico.gerador"|"painelfotovoltaico.referencia",
-    //   "thingId":"INA226"|"AHT20"|"esp32"|...,
-    //   "sensorData":{ ... } }
     const isDittoTopic = topic.toLowerCase().startsWith('/ditto/events/painelfotovoltaico.');
     if (!isDittoTopic) {
       return;
@@ -474,10 +466,8 @@ function initMqtt() {
       return;
     }
 
-    // Marcamos que recebemos dado válido nesta janela
     receivedSinceLastTick = true;
 
-    // Atualiza o estado em função do thingId
     try {
       switch (thingId) {
         case 'INA226': {
@@ -531,7 +521,6 @@ function initMqtt() {
         }
 
         case 'BMP280':
-          // Podemos usar como fonte alternativa de temperatura/pressão no futuro.
           break;
 
         case 'GPIO':
@@ -557,7 +546,6 @@ function initMqtt() {
           );
           break;
 
-        // Atualização dinâmica dos parâmetros do PV
         case 'pvConfig': {
           const logBase = {
             namespace: 'painelfotovoltaico.node',
@@ -566,17 +554,8 @@ function initMqtt() {
 
           try {
             const fields = [
-              'voc0',
-              'isc0',
-              'vmp0',
-              'imp0',
-              'alphav',
-              'alphai',
-              'G0',
-              'T0',
-              'q',
-              'kConst',
-              'Ns'
+              'voc0', 'isc0', 'vmp0', 'imp0', 'alphav', 'alphai',
+              'G0', 'T0', 'q', 'kConst', 'Ns'
             ];
 
             const updated = {};
@@ -594,13 +573,11 @@ function initMqtt() {
               throw new Error('Nenhum campo de PV encontrado em sensorData.');
             }
 
-            // Atualiza variáveis em memória
             if (updated.voc0 !== undefined) voc0 = updated.voc0;
             if (updated.isc0 !== undefined) isc0 = updated.isc0;
             if (updated.vmp0 !== undefined) vmp0 = updated.vmp0;
             if (updated.imp0 !== undefined) imp0 = updated.imp0;
 
-            // Recalcula kv e ki
             kv = vmp0 / voc0;
             ki = imp0 / isc0;
 
@@ -612,7 +589,6 @@ function initMqtt() {
             if (updated.kConst !== undefined) kConst = updated.kConst;
             if (updated.Ns !== undefined) Ns = updated.Ns;
 
-            // Atualiza objeto iniConfig.pv (será usado para regravar o INI)
             iniConfig.pv = iniConfig.pv || {};
             for (const key of fields) {
               if (updated[key] !== undefined) {
@@ -620,30 +596,21 @@ function initMqtt() {
               }
             }
 
-            // Regrava o config.ini
             const newIni = buildIni(iniConfig);
             fs.writeFileSync(CONFIG_INI_PATH, newIni, 'utf8');
 
             logger.info({ updated }, 'Parâmetros PV atualizados via pvConfig MQTT.');
 
-            // Publica log de sucesso
             if (mqttClient && mqttClient.connected) {
               const logPayload = JSON.stringify({
                 ...logBase,
                 status: 'ok',
                 message: 'Parâmetros PV atualizados com sucesso.',
                 pv: {
-                  voc0,
-                  isc0,
-                  vmp0,
-                  imp0,
-                  alphav: alphav * 100, // volta para % no log
+                  voc0, isc0, vmp0, imp0,
+                  alphav: alphav * 100,
                   alphai: alphai * 100,
-                  G0,
-                  T0,
-                  q,
-                  kConst,
-                  Ns
+                  G0, T0, q, kConst, Ns
                 }
               });
 
@@ -681,7 +648,6 @@ function initMqtt() {
             }
           }
 
-          // Nada para gravar no banco para pvConfig, então apenas break
           break;
         }
 
@@ -690,13 +656,12 @@ function initMqtt() {
           break;
       }
 
-      // Tenta calcular/persistir leitura NORMAL (sensores) – não afeta pvConfig
       if (thingId !== 'pvConfig') {
         calculateEstimatedPowerFromState();
 
         const insertSql = `
-          INSERT INTO readings (voltage, current_mA, power_mW, lux, temperature, humidity, irradiance, estimatedPower)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO readings (voltage, current_mA, power_mW, lux, temperature, humidity, irradiance, estimatedPower, falha)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
         const vals = [
           state.voltage,
@@ -706,7 +671,8 @@ function initMqtt() {
           state.temperature,
           state.humidity,
           state.irradiance,
-          state.estimatedPower
+          state.estimatedPower,
+          falhaState
         ];
         await pool.query(insertSql, vals);
       }
@@ -719,19 +685,11 @@ function initMqtt() {
 // ====== API PV CONFIG ======
 app.get('/api/pv-config', (req, res) => {
   try {
-    // alphav/alphai voltam para %/°C para o frontend
     res.json({
-      voc0,
-      isc0,
-      vmp0,
-      imp0,
+      voc0, isc0, vmp0, imp0,
       alphav: alphav * 100,
       alphai: alphai * 100,
-      G0,
-      T0,
-      q,
-      kConst,
-      Ns
+      G0, T0, q, kConst, Ns
     });
   } catch (err) {
     logger.error(err, 'Erro /api/pv-config (GET)');
@@ -742,17 +700,8 @@ app.get('/api/pv-config', (req, res) => {
 app.post('/api/pv-config', (req, res) => {
   const body = req.body || {};
   const fields = [
-    'voc0',
-    'isc0',
-    'vmp0',
-    'imp0',
-    'alphav',
-    'alphai',
-    'G0',
-    'T0',
-    'q',
-    'kConst',
-    'Ns'
+    'voc0', 'isc0', 'vmp0', 'imp0', 'alphav', 'alphai',
+    'G0', 'T0', 'q', 'kConst', 'Ns'
   ];
 
   const sensorData = {};
@@ -798,6 +747,28 @@ app.post('/api/pv-config', (req, res) => {
   }
 });
 
+// ====== API FALHA ======
+app.get('/api/falha', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT falha FROM readings ORDER BY ts DESC LIMIT 1');
+    const falha = rows.length ? (rows[0].falha || 0) : 0;
+    res.json({ falha });
+  } catch(err) {
+    logger.error(err, 'Erro /api/falha (GET)');
+    res.status(500).json({ error: 'Erro ao buscar falha' });
+  }
+});
+
+app.post('/api/falha', (req, res) => {
+  try {
+    falhaState = req.body.falha ? 1 : 0;
+    res.json({ ok: true, falha: falhaState });
+  } catch (err) {
+    logger.error(err, 'Erro /api/falha (POST)');
+    res.status(500).json({ error: 'Erro ao atualizar falha' });
+  }
+});
+
 // ====== API /api/readings ======
 const ALLOWED_METRICS = new Set([
   'voltage',
@@ -819,7 +790,8 @@ const ALL_METRICS = [
   'temperature',
   'humidity',
   'irradiance',
-  'estimatedPower'
+  'estimatedPower',
+  'falha'
 ];
 
 function toMysqlDateTimeUTC(isoStr) {
@@ -1011,7 +983,6 @@ async function startSock() {
   });
 
   sock.ev.process(async (events) => {
-    // Conexão
     if (events['connection.update']) {
       const update = events['connection.update'];
       const { connection, lastDisconnect, qr } = update;
@@ -1040,7 +1011,6 @@ async function startSock() {
       await saveCreds();
     }
 
-    // Mensagens
     if (events['messages.upsert']) {
       const upsert = events['messages.upsert'];
       if (upsert.type !== 'notify') return;
@@ -1061,7 +1031,7 @@ async function startSock() {
           try {
             const q = `
               SELECT DATE_FORMAT(ts, '%Y-%m-%d %H:%i:%s') AS ts,
-                      voltage, current_mA, power_mW, lux, temperature, humidity, irradiance, estimatedPower
+                      voltage, current_mA, power_mW, lux, temperature, humidity, irradiance, estimatedPower, falha
               FROM readings
               ORDER BY ts DESC
               LIMIT 1
@@ -1078,17 +1048,21 @@ async function startSock() {
             const fmt = (v, suf) =>
               v === null || v === undefined ? '--' : `${Number(v).toFixed(2)}${suf}`;
 
+            const fmtPower = (v, suf) =>
+              v === null || v === undefined ? '--' : `${(Number(v) / 1000).toFixed(3)}${suf}`;
+
             const lines = rows.map((r) =>
               [
                 `🕒 ${r.ts}`,
                 `Tensão: ${fmt(r.voltage, ' V')}`,
-                `Corrente: ${fmt(r.current_mA, ' mA')}`,
-                `Potência: ${fmt(r.power_mW, ' mW')}`,
+                `Corrente: ${fmt(r.current_mA, ' A')}`,
+                `Potência: ${fmtPower(r.power_mW, ' W')}`,
                 `Luminosidade: ${fmt(r.lux, ' lux')}`,
                 `Temperatura: ${fmt(r.temperature, ' °C')}`,
                 `Umidade: ${fmt(r.humidity, ' %')}`,
                 `Irradiância: ${fmt(r.irradiance, ' W/m²')}`,
-                `Pot. Estimada: ${fmt(r.estimatedPower, ' W')}`
+                `Pot. Estimada: ${fmt(r.estimatedPower, ' W')}`,
+                `Falha: ${r.falha ? 'Ativada (1)' : 'Desativada (0)'}`
               ].join('\n')
             );
 
@@ -1140,7 +1114,6 @@ async function startSock() {
           });
           continue;
         }
-
       }
     }
   });
@@ -1153,7 +1126,6 @@ async function startSock() {
   await initDb();
   initMqtt();
 
-  // ⬇️ Intervalo para publicar /all a cada 1 segundo, se houve mudanças
   setInterval(() => {
     try {
       publishAllIfChanged();
