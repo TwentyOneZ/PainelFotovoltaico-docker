@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Gêmeo Digital do Painel Fotovoltáico</title>
+  <title>Gêmeo Digital de módulo Fotovoltaico</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.umd.min.js"></script>
@@ -32,6 +32,15 @@
     .msg{margin-top:12px;font-size:14px;color:#d9e2ff;background:rgba(125,160,255,0.08);border:1px solid rgba(125,160,255,0.18);padding:10px 12px;border-radius:12px;display:none}
     .msg.error{color:#ffdede;background:rgba(255,93,93,0.08);border-color:rgba(255,93,93,0.24)}
     .legend{margin-top:6px;font-size:12px;color:var(--muted)}
+    
+    /* CSS para o Switch de Falha */
+    .switch { position: relative; display: inline-block; width: 44px; height: 24px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(255,255,255,0.12); transition: .4s; border-radius: 24px; }
+    .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 4px; bottom: 4px; background-color: var(--text); transition: .4s; border-radius: 50%; }
+    input:checked + .slider { background-color: var(--red); }
+    input:checked + .slider:before { transform: translateX(20px); }
+
     .pv-overlay{
       position:fixed;
       inset:0;
@@ -78,15 +87,15 @@
 </head>
 <body>
   <div class="container">
-    <div class="title"><span class="dot"></span><h1>Gráfico do Painel — intervalo customizado</h1></div>
+    <div class="title"><span class="dot"></span><h1>Gêmeo Digital de módulo Fotovoltaico — intervalo customizado</h1></div>
     <div class="card">
       <div class="grid">
         <div>
           <label for="metric">Grandeza</label>
           <select id="metric">
             <option value="voltage">Tensão (V)</option>
-            <option value="current_mA">Corrente (mA)</option>
-            <option value="power_mW">Potência (mW)</option>
+            <option value="current_mA">Corrente (A)</option>
+            <option value="power_mW">Potência (W)</option>
             <option value="lux">Luminosidade (lux)</option>
             <option value="temperature">Temperatura (°C)</option>
             <option value="humidity">Umidade (%)</option>
@@ -110,18 +119,27 @@
           <div class="actions">
             <input type="time" id="endTime" step="60" style="flex:1" />
             <button id="run">Exibir gráfico</button>
-            <!-- <button id="resetZoom" class="download-btn">Resetar zoom</button> -->
-            <button id="downloadCsv" class="download-btn">Baixar CSV</button> </div>
+            <button id="downloadCsv" class="download-btn">Baixar CSV</button>
           </div>
         </div>
         <div>
           <label for="maToggle">Média móvel</label>
-          <div class="actions">
+          <div class="actions" style="height: 42px; align-items: center;">
             <input type="checkbox" id="maToggle" />
             <input type="number" id="maWindow" min="1" value="5" style="width:90px" />
             <span class="hint" style="margin-left:8px">min</span>
           </div>
-        </div>        
+        </div>
+        <div>
+          <label for="falhaToggle">Falha</label>
+          <div class="actions" style="height: 42px; align-items: center;">
+            <label class="switch">
+              <input type="checkbox" id="falhaToggle">
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div> 
+      </div>
     </div>
     <div class="hint">O fuso é o do seu navegador; a API retorna ISO/UTC.</div>
     <div id="msg" class="msg"></div>
@@ -129,14 +147,10 @@
       <canvas id="chart" height="110"></canvas>
       <div class="legend" id="legend"></div>
     </div>
-    <!-- Botão para abrir painel de configuração do PV -->
     <div style="margin-top:16px; text-align:right;">
       <button id="openPvConfig" class="download-btn">Configurar PV</button>
     </div>
-  </div> <!-- fim .container principal -->
-
-  <!-- Overlay / Painel de configuração do PV -->
-  <div id="pvConfigOverlay" class="pv-overlay">
+  </div> <div id="pvConfigOverlay" class="pv-overlay">
     <div class="pv-panel">
       <h2>Parâmetros do Módulo FV</h2>
       <p>Ajuste os parâmetros usados no cálculo da potência estimada.</p>
@@ -196,7 +210,6 @@
       </div>
     </div>
   </div>
-</div>
 
   <script>
     function $(id){ return document.getElementById(id); }
@@ -233,7 +246,7 @@
               borderColor: accentColor
             },
             { // potência estimada – começa oculta
-              label: 'Potência Estimada (mW)',
+              label: 'Potência Estimada (W)',
               data: [],
               pointRadius: 0,
               tension: 0.15,
@@ -262,8 +275,8 @@
                 mode: 'x'
               },
               zoom: {
-                wheel: { enabled: true },   // zoom com scroll do mouse
-                pinch: { enabled: true },   // zoom com gesto em touch
+                wheel: { enabled: true },   
+                pinch: { enabled: true },   
                 mode: 'x'
               },
               limits: {
@@ -278,29 +291,20 @@
       return chart;
     }
 
-    // // Botão para resetar o zoom do gráfico
-    // $('resetZoom').addEventListener('click', () => {
-    //   const c = ensureChart();
-    //   if (c && typeof c.resetZoom === 'function') {
-    //     c.resetZoom();
-    //   }
-    // });
-
     const API_URL = '/api/readings';
-    const MAX_POINTS = 2000; // máx. de pontos por série no gráfico
+    const MAX_POINTS = 2000;
 
     async function fetchReadings(metric, startISO, endISO) {
       const url = new URL(API_URL, window.location.origin);
       url.searchParams.set('metric', metric);
       url.searchParams.set('start', startISO);
       url.searchParams.set('end', endISO);
-      url.searchParams.set('maxPoints', String(MAX_POINTS)); // pede agregação
+      url.searchParams.set('maxPoints', String(MAX_POINTS)); 
 
       const res = await fetch(url.toString());
       if (!res.ok) throw new Error('Erro na API: ' + res.status);
       return res.json();
     }
-
 
     function toISO(dateStr, timeStr){
       const [y,m,d] = dateStr.split('-').map(Number);
@@ -312,8 +316,8 @@
     function unitFor(metric){
       return {
         voltage: 'V',
-        current_mA: 'mA',
-        power_mW: 'mW',
+        current_mA: 'A',
+        power_mW: 'W',
         lux: 'lux',
         temperature: '°C',
         humidity: '%',
@@ -327,8 +331,12 @@
         return rawData.map(p => {
             const y = p[metric] ?? p.value;
             if (y === null || y === undefined) return null;
-            const num = Number(y);
+            let num = Number(y);
             if (!Number.isFinite(num)) return null;
+            // Converte a unidade original do gráfico para W
+            if (metric === 'power_mW') {
+                num = num / 1000;
+            }
             const localDate = new Date(p.ts);
             return { x: localDate, y: num };
         }).filter(Boolean);
@@ -362,12 +370,43 @@
       return res;
     }
 
+    // ======== Lógica da Falha ========
+    async function updateFalhaSwitch() {
+      try {
+        const res = await fetch('/api/falha');
+        if (res.ok) {
+          const data = await res.json();
+          $('falhaToggle').checked = (data.falha === 1);
+        }
+      } catch(e) {
+        console.error('Erro ao buscar estado da falha', e);
+      }
+    }
+
+    // Atualiza ao carregar a página
+    updateFalhaSwitch();
+
+    // Envia alteração ao clicar na switch
+    $('falhaToggle').addEventListener('change', async (e) => {
+      try {
+        await fetch('/api/falha', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ falha: e.target.checked ? 1 : 0 })
+        });
+      } catch (err) {
+        console.error('Erro ao atualizar falha', err);
+      }
+    });
 
     $('run').addEventListener('click', async () => {
       const metric = $('metric').value;
       const startDate = $('startDate').value, startTime = $('startTime').value;
       const endDate   = $('endDate').value,   endTime   = $('endTime').value;
       const msg = $('msg'); msg.style.display = 'none';
+
+      // Atualiza o estado da falha do banco para espelhar o dado mais recente na consulta atual
+      updateFalhaSwitch();
 
       if (!startDate || !startTime || !endDate || !endTime) {
         msg.textContent = 'Preencha data e hora inicial e final.';
@@ -379,21 +418,17 @@
 
       const c = ensureChart();
 
-      // limpa datasets
       c.data.datasets[0].data = [];
       c.data.datasets[1].data = [];
       c.data.datasets[1].hidden = true;
       c.update();
 
-      // ✅ corrigido: usar endISO (não ENDISO)
       $('legend').textContent = `Exibindo: ${metric} (${unitFor(metric)}) de ${startISO} a ${endISO}`;
 
-      // >>> NOVO: ler opções de média móvel
       const useMA   = $('maToggle').checked;
       const winMins = parseInt($('maWindow').value, 10) || 5;
 
       try {
-        // métrica principal
         const primaryRaw    = await fetchReadings(metric, startISO, endISO);
         let   primaryPoints = processDataForChart(primaryRaw, metric);
 
@@ -407,7 +442,7 @@
 
         let hasData = primaryPoints.length > 0;
 
-        // potência estimada só se a métrica for Potência (mW)
+        // potência estimada só se a métrica for Potência
         if (metric === 'power_mW') {
           try {
             const secondaryRaw    = await fetchReadings('estimatedPower', startISO, endISO);
@@ -415,9 +450,9 @@
 
             if (useMA) {
               secondaryPoints = rollingMeanByMinutes(secondaryPoints, winMins);
-              c.data.datasets[1].label  = `Potência Estimada (mW) — MM ${winMins} min`;
+              c.data.datasets[1].label  = `Potência Estimada (W) — MM ${winMins} min`;
             } else {
-              c.data.datasets[1].label  = `Potência Estimada (mW)`;
+              c.data.datasets[1].label  = `Potência Estimada (W)`;
             }
 
             c.data.datasets[1].data   = secondaryPoints;
@@ -441,7 +476,7 @@
       }
     });
     
-    // NOVO: Lógica para o botão de download CSV
+    // Botão de download CSV
     $('downloadCsv').addEventListener('click', async () => {
       const startDate = $('startDate').value, startTime = $('startTime').value;
       const endDate   = $('endDate').value,   endTime   = $('endTime').value;
@@ -475,9 +510,7 @@
         
         const blob = await res.blob();
         
-        // Cria um link temporário para forçar o download
         const a = document.createElement('a');
-        // Tenta obter o nome do arquivo do header 'Content-Disposition', ou usa um fallback
         const contentDisposition = res.headers.get('Content-Disposition');
         const filename = contentDisposition ? 
                          contentDisposition.split('filename=')[1].replace(/"/g, '') : 
@@ -498,7 +531,8 @@
         msg.className = 'msg error'; msg.style.display = 'block';
       }
     });
-        // ==================== CONFIGURAÇÃO PV ====================
+
+    // ==================== CONFIGURAÇÃO PV ====================
     const PV_FIELDS = [
       'voc0','isc0','vmp0','imp0',
       'alphav','alphai','G0','T0','q','kConst','Ns'
