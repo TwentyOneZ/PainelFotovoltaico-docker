@@ -401,7 +401,8 @@ function calculateEstimatedPowerFromState() {
 
     const i = (a * V * V + b * V + c) * u1 + (-eParam - Math.sqrt(discriminant)) / (2 * d) * u2;
 
-    const estimatedPower = V * i; // Watts
+    let estimatedPower = V * i; // Watts
+    estimatedPower = Math.max(0, estimatedPower);
 
     if (!Number.isFinite(estimatedPower)) {
       logger.warn(
