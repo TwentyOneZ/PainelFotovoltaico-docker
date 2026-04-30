@@ -639,16 +639,16 @@ function initMqtt() {
                 }
               });
 
-              mqttClient.publish(
-                '/ditto/events/painelfotovoltaico.node/pvConfig/log',
-                logPayload,
-                { qos: 1 },
-                (err) => {
-                  if (err) {
-                    logger.error({ err }, 'Erro ao publicar log de pvConfig (sucesso).');
-                  }
-                }
-              );
+              // # mqttClient.publish(
+              // #   '/ditto/events/painelfotovoltaico.node/pvConfig/log',
+              // #   logPayload,
+              // #   { qos: 1 },
+              // #   (err) => {
+              // #     if (err) {
+              // #       logger.error({ err }, 'Erro ao publicar log de pvConfig (sucesso).');
+              // #     }
+              // #   }
+              // # );
             }
           } catch (err) {
             logger.error({ err }, 'Erro ao processar pvConfig');
@@ -660,16 +660,16 @@ function initMqtt() {
                 message: err.message || String(err)
               });
 
-              mqttClient.publish(
-                '/ditto/events/painelfotovoltaico.node/pvConfig/log',
-                logPayload,
-                { qos: 1 },
-                (pubErr) => {
-                  if (pubErr) {
-                    logger.error({ pubErr }, 'Erro ao publicar log de pvConfig (erro).');
-                  }
-                }
-              );
+              // # mqttClient.publish(
+              // #   '/ditto/events/painelfotovoltaico.node/pvConfig/log',
+              // #   logPayload,
+              // #   { qos: 1 },
+              // #   (pubErr) => {
+              // #     if (pubErr) {
+              // #       logger.error({ pubErr }, 'Erro ao publicar log de pvConfig (erro).');
+              // #     }
+              // #   }
+              // # );
             }
           }
 
