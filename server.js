@@ -823,6 +823,25 @@ function toMysqlDateTimeUTC(isoStr) {
   return d.toISOString().slice(0, 19).replace('T', ' ');
 }
 
+function csvValue(value) {
+  if (value === null || value === undefined) return '';
+
+  const str = String(value);
+  if (/[;"\r\n]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+
+  return str;
+}
+
+function csvLine(values) {
+  return values.map(csvValue).join(';') + '\n';
+}
+
+function formatCsvTimestamp(ts) {
+  return new Date(ts).toISOString().replace('T', ' ').slice(0, 19);
+}
+
 app.get('/api/readings', async (req, res) => {
   try {
     const { metric, start, end, maxPoints: maxPointsRaw } = req.query;
@@ -937,6 +956,34 @@ app.get('/api/readings', async (req, res) => {
 
 // ====== API /api/download (Exportação CSV de todos os dados) ======
 app.get('/api/download', async (req, res) => {
+  let conn;
+  let query;
+  let completed = false;
+
+  const releaseConnection = () => {
+    if (conn) {
+      conn.release();
+      conn = null;
+    }
+  };
+
+  const failStream = (err) => {
+    if (completed) return;
+    completed = true;
+
+    logger.error(err, 'Erro /api/download');
+    releaseConnection();
+
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Erro interno ao consultar o banco para download.' });
+      return;
+    }
+
+    if (!res.destroyed) {
+      res.destroy(err);
+    }
+  };
+
   try {
     const { start, end } = req.query;
 
@@ -946,6 +993,8 @@ app.get('/api/download', async (req, res) => {
 
     const startUtc = toMysqlDateTimeUTC(start);
     const endUtc = toMysqlDateTimeUTC(end);
+
+    conn = await pool.getConnection();
 
     const columns = ['ts'].concat(ALL_METRICS).map((col) => `\`${col}\``).join(', ');
     
@@ -957,35 +1006,72 @@ app.get('/api/download', async (req, res) => {
                    AND CONVERT_TZ(?, '+00:00', @@session.time_zone)
       ORDER BY ts ASC
     `;
-    const [rows] = await pool.query(sql, [startUtc, endUtc]);
 
-    if (rows.length === 0) {
-      return res.status(204).send();
+    const rawConn = conn.connection;
+    if (!rawConn || typeof rawConn.query !== 'function') {
+      throw new Error('Conexao mysql2 sem interface de stream disponivel.');
     }
-
-    const headerLabels = ['Instante'].concat(ALL_METRICS);
-    const csvHeader = headerLabels.join(';') + '\n';
-
-    const csvData = rows
-      .map((row) => {
-        const ts = new Date(row.ts).toISOString().replace('T', ' ').slice(0, 19);
-        const values = ALL_METRICS.map((metric) => {
-          const value = row[metric];
-          return value !== null && value !== undefined ? String(Number(value)) : '';
-        });
-        return [ts].concat(values).join(';');
-      })
-      .join('\n');
-
-    const csvContent = csvHeader + csvData;
 
     const filename = `dados_painel_full_${start.slice(0, 10)}_a_${end.slice(0, 10)}.csv`;
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.send(csvContent);
+    res.flushHeaders();
+
+    res.on('close', () => {
+      if (completed) return;
+      completed = true;
+
+      if (query) {
+        query.removeAllListeners();
+      }
+
+      if (typeof rawConn.destroy === 'function') {
+        rawConn.destroy();
+        conn = null;
+      } else {
+        releaseConnection();
+      }
+    });
+
+    res.write(csvLine(['Instante'].concat(ALL_METRICS)));
+
+    query = rawConn.query(sql, [startUtc, endUtc]);
+
+    query.on('result', (row) => {
+      try {
+        const values = ALL_METRICS.map((metric) => {
+          const value = row[metric];
+          return value !== null && value !== undefined ? Number(value) : '';
+        });
+        const line = csvLine([formatCsvTimestamp(row.ts)].concat(values));
+
+        if (!res.write(line) && typeof rawConn.pause === 'function') {
+          rawConn.pause();
+          res.once('drain', () => {
+            if (!completed && typeof rawConn.resume === 'function') {
+              rawConn.resume();
+            }
+          });
+        }
+      } catch (err) {
+        if (typeof rawConn.destroy === 'function') {
+          rawConn.destroy();
+          conn = null;
+        }
+        failStream(err);
+      }
+    });
+
+    query.on('end', () => {
+      if (completed) return;
+      completed = true;
+      releaseConnection();
+      res.end();
+    });
+
+    query.on('error', failStream);
   } catch (err) {
-    logger.error(err, 'Erro /api/download');
-    res.status(500).json({ error: 'Erro interno ao consultar o banco para download.' });
+    failStream(err);
   }
 });
 
