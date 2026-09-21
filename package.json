@@ -1,6 +1,6 @@
 {
   "name": "painel-solar-fullstack",
-  "version": "1.1.0",
+  "version": "1.0.0",
   "description": "Backend Express + MQTT + WhatsApp + API + Live View SSE",
   "main": "server-v2.js",
   "license": "MIT",
