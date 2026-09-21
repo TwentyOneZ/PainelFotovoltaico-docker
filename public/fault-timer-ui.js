@@ -22,42 +22,111 @@
   let autoOffAtMs = null;
   let expiryRefreshPending = false;
 
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  async function fetchTimerStatus() {
+    const res = await fetch('/api/falha/timed', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+
+  async function fetchFaultState() {
+    const res = await fetch('/api/falha', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+
+  // O backend só marca o temporizador como inativo depois que o POST interno
+  // de falha=0 foi confirmado. Portanto /api/falha/timed é a fonte autoritativa
+  // para o encerramento de uma falha temporizada. Isso evita depender do último
+  // registro já persistido no MySQL, que pode estar até alguns segundos atrasado
+  // devido ao batch insert de 5 s.
+  async function syncAfterTimedExpiry() {
+    if (expiryRefreshPending) return;
+    expiryRefreshPending = true;
+    status.textContent = 'Encerrando falha temporária…';
+
+    try {
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        try {
+          const timer = await fetchTimerStatus();
+          if (timer.active && timer.auto_off_at) {
+            // O relógio do navegador pode ter chegado a zero antes do backend.
+            autoOffAtMs = Date.parse(timer.auto_off_at);
+            renderCountdown();
+            return;
+          }
+
+          // timer.active=false só é publicado pelo backend depois de desativar
+          // a flag com sucesso. Atualize a UI imediatamente, sem aguardar o lote
+          // seguinte ser persistido no MySQL.
+          autoOffAtMs = null;
+          falhaToggle.checked = false;
+          status.textContent = '';
+          return;
+        } catch (err) {
+          if (attempt === 19) throw err;
+        }
+        await sleep(500);
+      }
+    } catch (err) {
+      console.error('Erro ao confirmar expiração da falha temporária:', err);
+      status.textContent = 'Temporizador expirou; aguardando sincronização…';
+
+      // Fallback: tenta refletir o endpoint legado. Ele pode ficar brevemente
+      // atrasado enquanto o batch do MySQL ainda não foi gravado.
+      try {
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          const data = await fetchFaultState();
+          const active = data.falha === 1;
+          falhaToggle.checked = active;
+          if (!active) {
+            status.textContent = '';
+            return;
+          }
+          await sleep(500);
+        }
+      } catch (fallbackErr) {
+        console.error('Erro ao sincronizar estado da falha:', fallbackErr);
+      }
+    } finally {
+      expiryRefreshPending = false;
+    }
+  }
+
   function renderCountdown() {
     if (!autoOffAtMs) {
-      status.textContent = '';
+      if (!expiryRefreshPending) status.textContent = '';
       return;
     }
+
     const remaining = Math.max(0, Math.ceil((autoOffAtMs - Date.now()) / 1000));
     if (remaining > 0) {
       status.textContent = `Falha temporária ativa — ${remaining}s restantes`;
       return;
     }
 
-    status.textContent = 'Encerrando falha temporária…';
-    autoOffAtMs = null;
-    if (!expiryRefreshPending) {
-      expiryRefreshPending = true;
-      setTimeout(async () => {
-        try {
-          const res = await fetch('/api/falha');
-          if (res.ok) falhaToggle.checked = (await res.json()).falha === 1;
-        } catch (err) {
-          console.error('Erro ao atualizar estado da falha após temporizador:', err);
-        } finally {
-          expiryRefreshPending = false;
-          status.textContent = '';
-        }
-      }, 300);
-    }
+    // Não altera apenas visualmente e depois consulta /api/falha uma única vez.
+    // Esse era o race condition: /api/falha lê o último heartbeat persistido e
+    // podia devolver falha=1 durante a janela de até 5 s do batch insert.
+    syncAfterTimedExpiry();
   }
 
   async function refreshTimerStatus() {
     try {
-      const res = await fetch('/api/falha/timed');
-      if (!res.ok) return;
-      const data = await res.json();
+      const data = await fetchTimerStatus();
       autoOffAtMs = data.active && data.auto_off_at ? Date.parse(data.auto_off_at) : null;
-      if (data.active) falhaToggle.checked = true;
+      if (data.active) {
+        falhaToggle.checked = true;
+      } else {
+        // Quando não há timer ativo, use o estado normal da flag.
+        try {
+          const fault = await fetchFaultState();
+          falhaToggle.checked = fault.falha === 1;
+        } catch (err) {
+          console.error('Erro ao consultar estado normal da falha:', err);
+        }
+      }
       renderCountdown();
     } catch (err) {
       console.error('Erro ao consultar temporizador da falha:', err);
@@ -71,7 +140,7 @@
       console.error('Erro ao cancelar temporizador da falha:', err);
     }
     autoOffAtMs = null;
-    renderCountdown();
+    status.textContent = '';
   }
 
   // Intercepta o toggle manual antes do listener legado para que uma alteração
@@ -90,8 +159,8 @@
     } catch (err) {
       console.error('Erro ao atualizar falha manualmente:', err);
       try {
-        const res = await fetch('/api/falha');
-        if (res.ok) falhaToggle.checked = (await res.json()).falha === 1;
+        const data = await fetchFaultState();
+        falhaToggle.checked = data.falha === 1;
       } catch {}
     }
   }, true);
