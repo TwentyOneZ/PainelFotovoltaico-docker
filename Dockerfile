@@ -9,6 +9,7 @@ COPY package.json /app/
 # Se tiver package-lock.json, prefira npm ci --omit=dev
 RUN npm install --omit=dev
 
+COPY server-entry.js /app/
 COPY server-v2.js /app/
 COPY public /app/public
 
