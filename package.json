@@ -2,11 +2,11 @@
   "name": "painel-solar-fullstack",
   "version": "1.0.0",
   "description": "Backend Express + MQTT + WhatsApp + API + Live View SSE",
-  "main": "server-v2.js",
+  "main": "server-entry.js",
   "license": "MIT",
   "scripts": {
-    "start": "node server-v2.js",
-    "check": "node --check server-v2.js"
+    "start": "node server-entry.js",
+    "check": "node --check server-entry.js && node --check server-v2.js"
   },
   "dependencies": {
     "baileys": "^6.7.9",
