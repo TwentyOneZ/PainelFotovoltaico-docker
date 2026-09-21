@@ -4,8 +4,23 @@
   const grid = document.querySelector('.card .grid');
   if (!falhaToggle || !grid) return;
 
-  const block = document.createElement('div');
-  block.innerHTML = `
+  const typeBlock = document.createElement('div');
+  typeBlock.innerHTML = `
+    <label for="falhaTipo">Tipo da falha</label>
+    <div class="actions" style="height:42px;align-items:center">
+      <input
+        type="text"
+        id="falhaTipo"
+        maxlength="255"
+        placeholder="Ex.: curto-circuito na carga"
+        autocomplete="off"
+      />
+    </div>
+  `;
+  grid.appendChild(typeBlock);
+
+  const timerBlock = document.createElement('div');
+  timerBlock.innerHTML = `
     <label for="falhaDuration">Falha temporária (s)</label>
     <div class="actions" style="height:42px;align-items:center">
       <input type="number" id="falhaDuration" min="1" max="604800" step="1" value="60" style="width:120px" />
@@ -13,16 +28,22 @@
     </div>
     <div id="falhaTimedStatus" class="hint" style="min-height:16px;margin-top:6px"></div>
   `;
-  grid.appendChild(block);
+  grid.appendChild(timerBlock);
 
+  const typeInput = $('falhaTipo');
   const durationInput = $('falhaDuration');
   const okButton = $('falhaTimedOk');
   const status = $('falhaTimedStatus');
 
   let autoOffAtMs = null;
+  let activeFaultType = null;
   let expiryRefreshPending = false;
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const normalizedType = () => {
+    const text = String(typeInput.value || '').trim();
+    return text ? text.slice(0, 255) : null;
+  };
 
   async function fetchTimerStatus() {
     const res = await fetch('/api/falha/timed', { cache: 'no-store' });
@@ -36,11 +57,21 @@
     return res.json();
   }
 
-  // O backend só marca o temporizador como inativo depois que o POST interno
-  // de falha=0 foi confirmado. Portanto /api/falha/timed é a fonte autoritativa
-  // para o encerramento de uma falha temporizada. Isso evita depender do último
-  // registro já persistido no MySQL, que pode estar até alguns segundos atrasado
-  // devido ao batch insert de 5 s.
+  function renderCountdown() {
+    if (!autoOffAtMs) {
+      if (!expiryRefreshPending) status.textContent = '';
+      return;
+    }
+
+    const remaining = Math.max(0, Math.ceil((autoOffAtMs - Date.now()) / 1000));
+    if (remaining > 0) {
+      status.textContent = `Falha temporária ativa — ${remaining}s restantes${activeFaultType ? ` — ${activeFaultType}` : ''}`;
+      return;
+    }
+
+    syncAfterTimedExpiry();
+  }
+
   async function syncAfterTimedExpiry() {
     if (expiryRefreshPending) return;
     expiryRefreshPending = true;
@@ -51,16 +82,15 @@
         try {
           const timer = await fetchTimerStatus();
           if (timer.active && timer.auto_off_at) {
-            // O relógio do navegador pode ter chegado a zero antes do backend.
             autoOffAtMs = Date.parse(timer.auto_off_at);
+            activeFaultType = timer.tipo_falha || activeFaultType;
+            if (timer.tipo_falha) typeInput.value = timer.tipo_falha;
             renderCountdown();
             return;
           }
 
-          // timer.active=false só é publicado pelo backend depois de desativar
-          // a flag com sucesso. Atualize a UI imediatamente, sem aguardar o lote
-          // seguinte ser persistido no MySQL.
           autoOffAtMs = null;
+          activeFaultType = null;
           falhaToggle.checked = false;
           status.textContent = '';
           return;
@@ -73,14 +103,17 @@
       console.error('Erro ao confirmar expiração da falha temporária:', err);
       status.textContent = 'Temporizador expirou; aguardando sincronização…';
 
-      // Fallback: tenta refletir o endpoint legado. Ele pode ficar brevemente
-      // atrasado enquanto o batch do MySQL ainda não foi gravado.
       try {
         for (let attempt = 0; attempt < 20; attempt += 1) {
           const data = await fetchFaultState();
           const active = data.falha === 1;
           falhaToggle.checked = active;
+          if (active && data.tipo_falha) {
+            activeFaultType = data.tipo_falha;
+            typeInput.value = data.tipo_falha;
+          }
           if (!active) {
+            activeFaultType = null;
             status.textContent = '';
             return;
           }
@@ -94,35 +127,21 @@
     }
   }
 
-  function renderCountdown() {
-    if (!autoOffAtMs) {
-      if (!expiryRefreshPending) status.textContent = '';
-      return;
-    }
-
-    const remaining = Math.max(0, Math.ceil((autoOffAtMs - Date.now()) / 1000));
-    if (remaining > 0) {
-      status.textContent = `Falha temporária ativa — ${remaining}s restantes`;
-      return;
-    }
-
-    // Não altera apenas visualmente e depois consulta /api/falha uma única vez.
-    // Esse era o race condition: /api/falha lê o último heartbeat persistido e
-    // podia devolver falha=1 durante a janela de até 5 s do batch insert.
-    syncAfterTimedExpiry();
-  }
-
   async function refreshTimerStatus() {
     try {
       const data = await fetchTimerStatus();
       autoOffAtMs = data.active && data.auto_off_at ? Date.parse(data.auto_off_at) : null;
+      activeFaultType = data.active ? (data.tipo_falha || null) : null;
+
       if (data.active) {
         falhaToggle.checked = true;
+        if (data.tipo_falha) typeInput.value = data.tipo_falha;
       } else {
-        // Quando não há timer ativo, use o estado normal da flag.
         try {
           const fault = await fetchFaultState();
           falhaToggle.checked = fault.falha === 1;
+          activeFaultType = fault.falha === 1 ? (fault.tipo_falha || null) : null;
+          if (fault.falha === 1 && fault.tipo_falha) typeInput.value = fault.tipo_falha;
         } catch (err) {
           console.error('Erro ao consultar estado normal da falha:', err);
         }
@@ -140,27 +159,38 @@
       console.error('Erro ao cancelar temporizador da falha:', err);
     }
     autoOffAtMs = null;
+    activeFaultType = null;
     status.textContent = '';
   }
 
-  // Intercepta o toggle manual antes do listener legado para que uma alteração
-  // manual cancele qualquer desligamento automático pendente.
+  // Intercept the legacy toggle. When turning ON, the current text in
+  // "Tipo da falha" is sent together with the flag. When turning OFF the backend
+  // closes the fault interval, and subsequent 1 Hz rows store tipo_falha = NULL.
   falhaToggle.addEventListener('change', async (event) => {
     event.stopImmediatePropagation();
     const desired = event.target.checked ? 1 : 0;
+    const tipoFalha = desired ? normalizedType() : null;
     await cancelTimedFaultSchedule();
+
     try {
+      const payload = { falha: desired };
+      if (desired) payload.tipo_falha = tipoFalha;
       const res = await fetch('/api/falha', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ falha: desired })
+        body: JSON.stringify(payload)
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      activeFaultType = desired ? (data.tipo_falha || tipoFalha) : null;
+      if (desired && activeFaultType) typeInput.value = activeFaultType;
     } catch (err) {
       console.error('Erro ao atualizar falha manualmente:', err);
       try {
         const data = await fetchFaultState();
         falhaToggle.checked = data.falha === 1;
+        activeFaultType = data.falha === 1 ? (data.tipo_falha || null) : null;
+        if (activeFaultType) typeInput.value = activeFaultType;
       } catch {}
     }
   }, true);
@@ -173,17 +203,21 @@
       return;
     }
 
+    const tipoFalha = normalizedType();
     okButton.disabled = true;
     status.textContent = 'Ativando falha temporária…';
+
     try {
       const res = await fetch('/api/falha/timed', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ seconds })
+        body: JSON.stringify({ seconds, tipo_falha: tipoFalha })
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       falhaToggle.checked = true;
+      activeFaultType = data.tipo_falha || tipoFalha;
+      if (activeFaultType) typeInput.value = activeFaultType;
       autoOffAtMs = data.auto_off_at ? Date.parse(data.auto_off_at) : Date.now() + seconds * 1000;
       renderCountdown();
     } catch (err) {
