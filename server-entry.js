@@ -8,10 +8,46 @@ const path = require('path');
 const expressPath = require.resolve('express');
 const realExpress = require(expressPath);
 let capturedApp = null;
+let mirroredFalhaState = null;
 
 function wrappedExpress(...args) {
   const app = realExpress(...args);
   capturedApp = app;
+
+  // server-v2 mantém falhaState em memória, mas o GET /api/falha legado lê o
+  // último registro já persistido no MySQL. Como os heartbeats são gravados em
+  // lote, esse GET pode ficar alguns segundos atrasado. Espelhamos aqui toda
+  // alteração feita por POST para que, depois da primeira mutação do estado, o
+  // GET reflita imediatamente o estado efetivo do backend.
+  const originalGet = app.get.bind(app);
+  const originalPost = app.post.bind(app);
+
+  app.get = function wrappedGet(route, ...handlers) {
+    if (route === '/api/falha' && handlers.length > 0) {
+      const legacyHandler = handlers[0];
+      return originalGet(route, (req, res, next) => {
+        if (mirroredFalhaState !== null) {
+          return res.json({ falha: mirroredFalhaState });
+        }
+        return legacyHandler(req, res, next);
+      }, ...handlers.slice(1));
+    }
+    return originalGet(route, ...handlers);
+  };
+
+  app.post = function wrappedPost(route, ...handlers) {
+    if (route === '/api/falha' && handlers.length > 0) {
+      const legacyHandler = handlers[0];
+      return originalPost(route, (req, res, next) => {
+        if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'falha')) {
+          mirroredFalhaState = req.body.falha ? 1 : 0;
+        }
+        return legacyHandler(req, res, next);
+      }, ...handlers.slice(1));
+    }
+    return originalPost(route, ...handlers);
+  };
+
   return app;
 }
 Object.assign(wrappedExpress, realExpress);
