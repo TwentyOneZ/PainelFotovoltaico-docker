@@ -15,6 +15,27 @@ function wrappedExpress(...args) {
   return app;
 }
 Object.assign(wrappedExpress, realExpress);
+
+// Injeta a UI da falha temporária sem duplicar ou reescrever o dashboard principal.
+// O middleware estático original continua servindo todos os demais arquivos normalmente.
+wrappedExpress.static = function timedFaultStatic(root, options) {
+  const baseStatic = realExpress.static(root, options);
+  return function timedFaultStaticMiddleware(req, res, next) {
+    if (req.path === '/app.html') {
+      try {
+        const appPath = path.join(root, 'app.html');
+        let html = fs.readFileSync(appPath, 'utf8');
+        const scriptTag = '<script src="/fault-timer-ui.js"></script>';
+        if (!html.includes(scriptTag)) html = html.replace('</body>', `${scriptTag}\n</body>`);
+        return res.type('html').send(html);
+      } catch (err) {
+        console.error('[falha-timer] Falha ao injetar UI temporizada:', err);
+      }
+    }
+    return baseStatic(req, res, next);
+  };
+};
+
 require.cache[expressPath].exports = wrappedExpress;
 
 // server-v2 registers all existing routes and starts listening asynchronously.
