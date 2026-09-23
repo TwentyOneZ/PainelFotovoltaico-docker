@@ -1,5 +1,6 @@
 // server-entry.js
-// Extends server-v2 with backend-managed timed fault injection and fault-type metadata.
+// Extends server-v2 with backend-managed timed fault injection, fault-type metadata,
+// and source-timestamp-aware data access for Live View.
 // server-v2 remains the source of truth for the PV acquisition/backend.
 
 const fs = require('fs');
@@ -24,6 +25,21 @@ let autoOffAt = null;
 let autoOffTimer = null;
 let timedFaultType = null;
 let expiryInProgress = false;
+
+const GENERATOR_SOURCE_METRICS = new Set(['voltage', 'current_mA', 'power_mW']);
+const REFERENCE_SOURCE_METRICS = new Set([
+  'irradiance',
+  'estimatedPower',
+  'expectedLoadVoltage',
+  'expectedLoadCurrent',
+  'estimatedVmp',
+  'estimatedImp',
+  'estimatedMppPower'
+]);
+const SOURCE_TIME_METRICS = new Set([
+  ...GENERATOR_SOURCE_METRICS,
+  ...REFERENCE_SOURCE_METRICS
+]);
 
 function normalizeFaultType(value) {
   if (value === null || value === undefined) return null;
@@ -94,6 +110,19 @@ async function ensureFaultMetadataDb() {
       if (err.code !== 'ER_DUP_FIELDNAME') throw err;
     }
 
+    // Source-time queries are used continuously by Live View when a window is
+    // loaded or expanded. Index both receipt timestamps so those reads remain bounded.
+    for (const [indexName, columnName] of [
+      ['idx_generator_last_received_ts', 'generator_last_received_ts'],
+      ['idx_reference_last_received_ts', 'reference_last_received_ts']
+    ]) {
+      try {
+        await pool.query(`CREATE INDEX \`${indexName}\` ON readings (\`${columnName}\`)`);
+      } catch (err) {
+        if (err.code !== 'ER_DUP_KEYNAME') throw err;
+      }
+    }
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS fault_intervals (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -142,7 +171,7 @@ async function ensureFaultMetadataDb() {
     }
 
     faultDbPool = pool;
-    console.log('[falha-tipo] Coluna tipo_falha e histórico de intervalos prontos.');
+    console.log('[falha-tipo] Coluna tipo_falha, índices de origem e histórico de intervalos prontos.');
     return pool;
   })();
 
@@ -203,7 +232,7 @@ function wrappedExpress(...args) {
 
   // server-v2's legacy GET reads the last persisted heartbeat. Because writes are
   // batched, the endpoint can lag a few seconds. The mirrored state reflects the
-  // effective in-memory state immediately and now also exposes tipo_falha.
+  // effective in-memory state immediately and also exposes tipo_falha.
   const originalGet = app.get.bind(app);
   const originalPost = app.post.bind(app);
 
@@ -258,7 +287,7 @@ function wrappedExpress(...args) {
 }
 Object.assign(wrappedExpress, realExpress);
 
-// Inject the additional fault UI without duplicating the main dashboard file.
+// Inject auxiliary dashboard scripts without duplicating the main dashboard file.
 wrappedExpress.static = function timedFaultStatic(root, options) {
   const baseStatic = realExpress.static(root, options);
   return function timedFaultStaticMiddleware(req, res, next) {
@@ -266,11 +295,16 @@ wrappedExpress.static = function timedFaultStatic(root, options) {
       try {
         const appPath = path.join(root, 'app.html');
         let html = fs.readFileSync(appPath, 'utf8');
-        const scriptTag = '<script src="/fault-timer-ui.js"></script>';
-        if (!html.includes(scriptTag)) html = html.replace('</body>', `${scriptTag}\n</body>`);
+        const injectedScripts = [
+          '<script src="/fault-timer-ui.js"></script>',
+          '<script src="/source-time-live.js"></script>'
+        ];
+        for (const scriptTag of injectedScripts) {
+          if (!html.includes(scriptTag)) html = html.replace('</body>', `${scriptTag}\n</body>`);
+        }
         return res.type('html').send(html);
       } catch (err) {
-        console.error('[falha-timer] Falha ao injetar UI temporizada:', err);
+        console.error('[dashboard-extension] Falha ao injetar scripts auxiliares:', err);
       }
     }
     return baseStatic(req, res, next);
@@ -287,6 +321,128 @@ if (!capturedApp) {
 }
 
 const app = capturedApp;
+
+function metricSourceColumn(metric) {
+  if (GENERATOR_SOURCE_METRICS.has(metric)) return 'generator_last_received_ts';
+  if (REFERENCE_SOURCE_METRICS.has(metric)) return 'reference_last_received_ts';
+  return null;
+}
+
+function mysqlUtcString(value) {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) throw new Error('Timestamp inválido');
+  return d.toISOString().slice(0, 23).replace('T', ' ');
+}
+
+function mysqlDateTimeToIso(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString();
+  const text = String(value).trim();
+  if (!text) return null;
+  const iso = `${text.replace(' ', 'T')}Z`;
+  const parsed = new Date(iso);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+// Live View historical bootstrap using the receipt time of the actual source,
+// instead of the Docker heartbeat. Repeated 1 Hz heartbeats that contain the same
+// source sample are deduplicated before being returned.
+app.get('/api/live-source-readings', async (req, res) => {
+  try {
+    const metric = String(req.query.metric || '');
+    if (!SOURCE_TIME_METRICS.has(metric)) {
+      return res.status(400).json({ error: 'metric sem timestamp de origem suportado' });
+    }
+    if (!req.query.start || !req.query.end) {
+      return res.status(400).json({ error: 'start/end obrigatórios' });
+    }
+
+    const sourceColumn = metricSourceColumn(metric);
+    const start = mysqlUtcString(req.query.start);
+    const end = mysqlUtcString(req.query.end);
+    const startMs = new Date(req.query.start).getTime();
+    const endMs = new Date(req.query.end).getTime();
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+      return res.status(400).json({ error: 'intervalo inválido' });
+    }
+
+    const requestedMax = Number.parseInt(req.query.maxPoints, 10);
+    const maxPoints = Number.isFinite(requestedMax) && requestedMax > 0
+      ? Math.min(requestedMax, 20000)
+      : 5000;
+
+    const pool = await ensureFaultMetadataDb();
+    const [countRows] = await pool.query(
+      `SELECT COUNT(DISTINCT \`${sourceColumn}\`) AS total
+       FROM readings
+       WHERE \`${metric}\` IS NOT NULL
+         AND \`${sourceColumn}\` IS NOT NULL
+         AND \`${sourceColumn}\` BETWEEN ? AND ?`,
+      [start, end]
+    );
+    const total = Number(countRows?.[0]?.total || 0);
+
+    let rows;
+    if (total <= maxPoints) {
+      [rows] = await pool.query(
+        `SELECT source_ts, value
+         FROM (
+           SELECT
+             \`${sourceColumn}\` AS source_ts,
+             \`${metric}\` AS value,
+             ROW_NUMBER() OVER (
+               PARTITION BY \`${sourceColumn}\`
+               ORDER BY id DESC
+             ) AS rn
+           FROM readings
+           WHERE \`${metric}\` IS NOT NULL
+             AND \`${sourceColumn}\` IS NOT NULL
+             AND \`${sourceColumn}\` BETWEEN ? AND ?
+         ) AS dedup
+         WHERE rn = 1
+         ORDER BY source_ts ASC`,
+        [start, end]
+      );
+    } else {
+      const bucketSec = Math.max(1, Math.ceil(((endMs - startMs) / 1000) / maxPoints));
+      [rows] = await pool.query(
+        `WITH dedup AS (
+           SELECT
+             \`${sourceColumn}\` AS source_ts,
+             \`${metric}\` AS value,
+             ROW_NUMBER() OVER (
+               PARTITION BY \`${sourceColumn}\`
+               ORDER BY id DESC
+             ) AS rn
+           FROM readings
+           WHERE \`${metric}\` IS NOT NULL
+             AND \`${sourceColumn}\` IS NOT NULL
+             AND \`${sourceColumn}\` BETWEEN ? AND ?
+         )
+         SELECT
+           FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(source_ts) / ?) * ?) AS source_ts,
+           AVG(value) AS value
+         FROM dedup
+         WHERE rn = 1
+         GROUP BY FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(source_ts) / ?) * ?)
+         ORDER BY source_ts ASC`,
+        [start, end, bucketSec, bucketSec, bucketSec, bucketSec]
+      );
+    }
+
+    res.json(rows
+      .map((row) => ({
+        ts: mysqlDateTimeToIso(row.source_ts),
+        [metric]: row.value == null ? null : Number(row.value),
+        time_source: sourceColumn
+      }))
+      .filter((row) => row.ts && Number.isFinite(row[metric]))
+    );
+  } catch (err) {
+    console.error('[live-source-time] Erro ao consultar dados por timestamp de origem:', err);
+    res.status(500).json({ error: 'Erro interno ao consultar série temporal por origem.' });
+  }
+});
 
 function writeTimerState() {
   try {
