@@ -36,9 +36,11 @@ const REFERENCE_SOURCE_METRICS = new Set([
   'estimatedImp',
   'estimatedMppPower'
 ]);
+const HEARTBEAT_SOURCE_METRICS = new Set(['lux', 'temperature', 'humidity']);
 const SOURCE_TIME_METRICS = new Set([
   ...GENERATOR_SOURCE_METRICS,
-  ...REFERENCE_SOURCE_METRICS
+  ...REFERENCE_SOURCE_METRICS,
+  ...HEARTBEAT_SOURCE_METRICS
 ]);
 
 function normalizeFaultType(value) {
@@ -325,6 +327,7 @@ const app = capturedApp;
 function metricSourceColumn(metric) {
   if (GENERATOR_SOURCE_METRICS.has(metric)) return 'generator_last_received_ts';
   if (REFERENCE_SOURCE_METRICS.has(metric)) return 'reference_last_received_ts';
+  if (HEARTBEAT_SOURCE_METRICS.has(metric)) return 'heartbeat_ts';
   return null;
 }
 
