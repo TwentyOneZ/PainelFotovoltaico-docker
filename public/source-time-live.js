@@ -49,6 +49,11 @@
   // preserving its current behaviour and backwards compatibility.
   fetchMetricInto = async function sourceTimedFetchMetricInto(c, metric, map, start, end, max) {
     if (end <= start) return;
+    if (metric === 'residual') {
+      const raw = await fetchReadings(metric, new Date(start).toISOString(), new Date(end).toISOString(), max);
+      for (const p of raw) pointInto(map, p.ts, p.residual);
+      return;
+    }
     const raw = await fetchSourceTimedReadings(
       metric,
       new Date(start).toISOString(),
@@ -63,8 +68,10 @@
   // single measurement point instead of creating artificial 1 Hz samples.
   snapshotsIntoCache = function sourceTimedSnapshotsIntoCache(c, rows) {
     for (const s of rows) {
-      const primaryTs = sourceTimestampForMetric(s, c.metric);
-      pointInto(c.primary, primaryTs, s[c.metric]);
+      const primaryTs = c.metric === 'residual'
+        ? (s.heartbeat_ts || s.ts)
+        : sourceTimestampForMetric(s, c.metric);
+      pointInto(c.primary, primaryTs, metricValue(s, c.metric));
 
       if (c.metric === 'power_mW') {
         const estimatedTs = sourceTimestampForMetric(s, 'estimatedPower');
