@@ -11,7 +11,7 @@
   // Other quantities                -> heartbeat_ts (until they receive their own
   //                                    explicit source timestamps).
 
-  const GENERATOR_METRICS = new Set(['voltage', 'current_mA', 'power_mW']);
+  const GENERATOR_METRICS = new Set(['voltage', 'current_A', 'power_W', 'current_ref_A']);
   const REFERENCE_METRICS = new Set([
     'irradiance',
     'estimatedPower',
@@ -73,7 +73,7 @@
         : sourceTimestampForMetric(s, c.metric);
       pointInto(c.primary, primaryTs, metricValue(s, c.metric));
 
-      if (c.metric === 'power_mW') {
+      if (c.metric === 'power_W') {
         const estimatedTs = sourceTimestampForMetric(s, 'estimatedPower');
         pointInto(c.secondary, estimatedTs, s.estimatedPower);
       }

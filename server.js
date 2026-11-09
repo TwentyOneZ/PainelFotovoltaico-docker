@@ -46,12 +46,12 @@ PORT = 4000
 DB_HOST = painel-mysql
 DB_PORT = 3306
 DB_USER = root
-DB_PASS = RunicK137
+DB_PASS =
 DB_NAME = painelSolar
 
 MQTT_URL = mqtt://cerise.freeddns.org:30001
 MQTT_USER = infinitwin_user
-MQTT_PASS = IwtLab#2025!
+MQTT_PASS =
 MQTT_PINS_TOPIC = /painelfotovoltaico.gerador/GPIO
 
 AUTH_DIR = /data/baileys_auth_info
@@ -133,13 +133,13 @@ const {
   DB_HOST = appCfg.DB_HOST || 'perspex.ddns.net',
   DB_PORT = appCfg.DB_PORT || '3306',
   DB_USER = appCfg.DB_USER || 'root',
-  DB_PASS = appCfg.DB_PASS || 'RunicK137',
+  DB_PASS = appCfg.DB_PASS || '',
   DB_NAME = appCfg.DB_NAME || 'painelSolar',
 
   // broker Ditto
   MQTT_URL = appCfg.MQTT_URL || 'mqtt://cerise.freeddns.org:30001',
   MQTT_USER = appCfg.MQTT_USER || 'infinitwin_user',
-  MQTT_PASS = appCfg.MQTT_PASS || 'IwtLab#2025!',
+  MQTT_PASS = appCfg.MQTT_PASS || '',
   MQTT_PINS_TOPIC = appCfg.MQTT_PINS_TOPIC || '/painelfotovoltaico.gerador/GPIO',
 
   // Diretório persistente para a sessão do Baileys (montado via volume)

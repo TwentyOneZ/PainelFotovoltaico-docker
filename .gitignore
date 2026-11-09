@@ -1,2 +1,7 @@
 /baileys_auth_info
 /index.basic.js
+# Segredos e dados locais (nunca versionar)
+.env
+/mysql-data/
+/data/
+node_modules/

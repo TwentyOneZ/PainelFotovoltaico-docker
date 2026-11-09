@@ -1,3 +1,10 @@
+# Segredos vêm do arquivo .env (ignorado pelo git). Veja .env.example.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"   # rotação: no máximo 3 x 10 MB por container
+    max-file: "3"
+
 services:
   painel-app:
     build: .
@@ -10,31 +17,55 @@ services:
       LOG_LEVEL: info
       DB_HOST: mysql
       DB_PORT: 3306
-      DB_USER: root
-      DB_PASS: RunicK137
+      DB_USER: ${DB_USER:-root}
+      DB_PASS: ${DB_PASS:?defina DB_PASS no .env}
       DB_NAME: painelSolar
-      MQTT_URL: mqtt://cerise.freeddns.org:30001
+      MQTT_URL: ${MQTT_URL:-mqtt://cerise.freeddns.org:30001}
+      MQTT_USER: ${MQTT_USER:?defina MQTT_USER no .env}
+      MQTT_PASS: ${MQTT_PASS:?defina MQTT_PASS no .env}
       MQTT_PINS_TOPIC: /painelfotovoltaico.gerador/GPIO
+      DEVICE_IDS: ${DEVICE_IDS:-painelfv01}
+      ALERT_WHATSAPP_NUMBER: ${ALERT_WHATSAPP_NUMBER:-}
       AUTH_DIR: /data/baileys_auth_info
+      TZ: UTC
     volumes:
       - baileys_auth:/data/baileys_auth_info
       - ./data:/data
       - ./public:/app/public
       - ./server-v2.js:/app/server-v2.js
+      - ./server-entry.js:/app/server-entry.js
       - ./config.ini:/app/config.ini
+    # Health real (MySQL + MQTT). O Docker marca "unhealthy" após ~2 min de falha;
+    # o scripts/healthwatch.sh (cron na VPS) reinicia o container nesse caso.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 8 -O /dev/null http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 4
+      start_period: 180s
+    logging: *default-logging
     depends_on:
-      - mysql
+      mysql:
+        condition: service_healthy
 
   mysql:
     image: mysql:8.4
     container_name: painel-mysql
+    restart: unless-stopped
     environment:
-      - MYSQL_ROOT_PASSWORD=RunicK137
-      - MYSQL_DATABASE=painelSolar
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?defina MYSQL_ROOT_PASSWORD no .env}
+      MYSQL_DATABASE: painelSolar
     ports:
-      - "3307:3306"
+      - "127.0.0.1:3307:3306"
     volumes:
       - ./mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    logging: *default-logging
 
 volumes:
   baileys_auth:

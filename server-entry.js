@@ -18,6 +18,7 @@ const TIMER_STATE_PATH = process.env.FALHA_TIMER_STATE_PATH || '/data/falha-time
 const SERVER_PORT = Number(process.env.PORT || 4000);
 const MAX_TIMED_FAULT_SECONDS = 7 * 24 * 60 * 60;
 const MAX_FAULT_TYPE_LENGTH = 255;
+const LIVE_QUERY_TIMEOUT_MS = 60000;
 
 let faultDbPool = null;
 let faultDbInitPromise = null;
@@ -26,7 +27,7 @@ let autoOffTimer = null;
 let timedFaultType = null;
 let expiryInProgress = false;
 
-const GENERATOR_SOURCE_METRICS = new Set(['voltage', 'current_mA', 'power_mW']);
+const GENERATOR_SOURCE_METRICS = new Set(['voltage', 'current_A', 'power_W', 'current_ref_A']);
 const REFERENCE_SOURCE_METRICS = new Set([
   'irradiance',
   'estimatedPower',
@@ -36,7 +37,7 @@ const REFERENCE_SOURCE_METRICS = new Set([
   'estimatedImp',
   'estimatedMppPower'
 ]);
-const HEARTBEAT_SOURCE_METRICS = new Set(['lux', 'temperature', 'humidity']);
+const HEARTBEAT_SOURCE_METRICS = new Set(['lux', 'temperature', 'humidity', 'temperature_bmp', 'pressure_Pa']);
 const SOURCE_TIME_METRICS = new Set([
   ...GENERATOR_SOURCE_METRICS,
   ...REFERENCE_SOURCE_METRICS,
@@ -87,6 +88,10 @@ async function ensureFaultMetadataDb() {
       password: process.env.DB_PASS || appCfg.DB_PASS || '',
       database: process.env.DB_NAME || appCfg.DB_NAME || 'painelSolar',
       connectionLimit: 3,
+      waitForConnections: true,
+      queueLimit: 50,
+      connectTimeout: 10000,
+      enableKeepAlive: true,
       dateStrings: true
     });
 
@@ -136,25 +141,29 @@ async function ensureFaultMetadataDb() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 
-    // The readings are buffered for ~5 s before INSERT. A fault interval history is
-    // therefore used instead of simply reading the current fault type at flush time.
-    // This makes each buffered heartbeat receive the type that was active at its own ts.
+    // Readings now arrive with the ESP32 measurement time and may be delivered
+    // hours late (flash buffer while offline). Both falha and tipo_falha are
+    // therefore derived from the fault interval active at the row's own ts.
     await pool.query('DROP TRIGGER IF EXISTS trg_readings_tipo_falha_bi');
     await pool.query(`
       CREATE TRIGGER trg_readings_tipo_falha_bi
       BEFORE INSERT ON readings
       FOR EACH ROW
       BEGIN
-        IF NEW.falha = 1 THEN
-          SET NEW.tipo_falha = (
-            SELECT fi.tipo_falha
-            FROM fault_intervals fi
-            WHERE NEW.ts >= fi.started_at
-              AND (fi.ended_at IS NULL OR NEW.ts < fi.ended_at)
-            ORDER BY fi.started_at DESC
-            LIMIT 1
-          );
+        DECLARE v_id BIGINT UNSIGNED DEFAULT NULL;
+        SET v_id = (
+          SELECT fi.id
+          FROM fault_intervals fi
+          WHERE NEW.ts >= fi.started_at
+            AND (fi.ended_at IS NULL OR NEW.ts < fi.ended_at)
+          ORDER BY fi.started_at DESC
+          LIMIT 1
+        );
+        IF v_id IS NOT NULL THEN
+          SET NEW.falha = 1;
+          SET NEW.tipo_falha = (SELECT tipo_falha FROM fault_intervals WHERE id = v_id);
         ELSE
+          SET NEW.falha = 0;
           SET NEW.tipo_falha = NULL;
         END IF;
       END
@@ -375,19 +384,19 @@ app.get('/api/live-source-readings', async (req, res) => {
       : 5000;
 
     const pool = await ensureFaultMetadataDb();
-    const [countRows] = await pool.query(
+    const [countRows] = await pool.query({ sql: 
       `SELECT COUNT(DISTINCT \`${sourceColumn}\`) AS total
        FROM readings
        WHERE \`${metric}\` IS NOT NULL
          AND \`${sourceColumn}\` IS NOT NULL
-         AND \`${sourceColumn}\` BETWEEN ? AND ?`,
+         AND \`${sourceColumn}\` BETWEEN ? AND ?`, timeout: LIVE_QUERY_TIMEOUT_MS },
       [start, end]
     );
     const total = Number(countRows?.[0]?.total || 0);
 
     let rows;
     if (total <= maxPoints) {
-      [rows] = await pool.query(
+      [rows] = await pool.query({ sql: 
         `SELECT source_ts, value
          FROM (
            SELECT
@@ -403,12 +412,12 @@ app.get('/api/live-source-readings', async (req, res) => {
              AND \`${sourceColumn}\` BETWEEN ? AND ?
          ) AS dedup
          WHERE rn = 1
-         ORDER BY source_ts ASC`,
+         ORDER BY source_ts ASC`, timeout: LIVE_QUERY_TIMEOUT_MS },
         [start, end]
       );
     } else {
       const bucketSec = Math.max(1, Math.ceil(((endMs - startMs) / 1000) / maxPoints));
-      [rows] = await pool.query(
+      [rows] = await pool.query({ sql: 
         `WITH dedup AS (
            SELECT
              \`${sourceColumn}\` AS source_ts,
@@ -428,7 +437,7 @@ app.get('/api/live-source-readings', async (req, res) => {
          FROM dedup
          WHERE rn = 1
          GROUP BY FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(source_ts) / ?) * ?)
-         ORDER BY source_ts ASC`,
+         ORDER BY source_ts ASC`, timeout: LIVE_QUERY_TIMEOUT_MS },
         [start, end, bucketSec, bucketSec, bucketSec, bucketSec]
       );
     }
@@ -490,7 +499,8 @@ async function setFaultFlag(value, attempts = 1, tipoFalha = null) {
       const response = await fetch(`http://127.0.0.1:${SERVER_PORT}/api/falha`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(10000)
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return await response.json();
