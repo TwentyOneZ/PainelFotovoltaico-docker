@@ -1051,6 +1051,42 @@ let sock = null;
 let sockUnsubscribe = null;
 let waConnected = false;
 let waStarting = false;
+
+// Ao reconectar, o WhatsApp reentrega mensagens pendentes/offline com type 'notify'
+// e, quando a descriptografia falha, o celular reenvia a mensagem (mesmo id, às vezes
+// com horário novo). Sem filtro, um "#status" antigo era respondido a cada reconexão.
+// Regra: comando só é executado se for recente E se o id nunca foi tratado. Os ids
+// tratados ficam em disco, para valer também depois de reinícios do backend.
+const WA_CMD_MAX_AGE_S = 120;
+const WA_HANDLED_PATH = process.env.WA_HANDLED_PATH || path.join(path.dirname(ALERT_STATE_PATH), 'whatsapp-handled-cmds.json');
+const WA_HANDLED_TTL_MS = 30 * 24 * 3600 * 1000;
+const handledWaMsgIds = new Map();  // id -> epoch ms em que foi tratado
+try {
+  if (fs.existsSync(WA_HANDLED_PATH)) {
+    for (const [k, t] of Object.entries(JSON.parse(fs.readFileSync(WA_HANDLED_PATH, 'utf8')))) handledWaMsgIds.set(k, t);
+  }
+} catch { /* arquivo inválido: recomeça vazio */ }
+function saveHandledWaMsgIds() {
+  try {
+    fs.mkdirSync(path.dirname(WA_HANDLED_PATH), { recursive: true });
+    const tmp = `${WA_HANDLED_PATH}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(handledWaMsgIds)), 'utf8');
+    fs.renameSync(tmp, WA_HANDLED_PATH);
+  } catch (err) { logger.error({ err }, 'Erro ao salvar ids de comandos do WhatsApp'); }
+}
+function shouldHandleWaCommand(m) {
+  const id = m.key?.id;
+  if (!id || handledWaMsgIds.has(id)) return false;
+  // marca o id mesmo quando recusado por idade: um reenvio posterior com horário
+  // novo também será ignorado
+  const now = Date.now();
+  handledWaMsgIds.set(id, now);
+  for (const [k, t] of handledWaMsgIds) { if (now - t > WA_HANDLED_TTL_MS || handledWaMsgIds.size > 1000) handledWaMsgIds.delete(k); else break; }
+  saveHandledWaMsgIds();
+  const rawTs = m.messageTimestamp;
+  const ts = Number(typeof rawTs === 'object' && rawTs?.toNumber ? rawTs.toNumber() : rawTs);
+  return !!ts && Date.now() / 1000 - ts <= WA_CMD_MAX_AGE_S;
+}
 let waReconnectTimer = null;
 let waBackoffMs = 2000;
 let alertJid = null;
@@ -1204,7 +1240,13 @@ async function startSock() {
         for (const m of upsert.messages) {
           const text = m.message?.conversation || m.message?.extendedTextMessage?.text || m.message?.imageMessage?.caption || '';
           const cmd = String(text).trim().toLowerCase();
-          if (cmd.startsWith('#')) await handleWhatsAppCommand(m.key.remoteJid, cmd).catch((err) => logger.error({ err }, 'Erro comando WhatsApp'));
+          if (!cmd.startsWith('#')) continue;
+          if (!shouldHandleWaCommand(m)) {
+            logger.info({ cmd, id: m.key?.id, ts: Number(m.messageTimestamp) }, 'Comando WhatsApp antigo/repetido ignorado');
+            continue;
+          }
+          logger.info({ cmd, from: m.key.remoteJid, id: m.key?.id, fromMe: m.key?.fromMe, ts: Number(m.messageTimestamp) }, 'Comando WhatsApp');
+          await handleWhatsAppCommand(m.key.remoteJid, cmd).catch((err) => logger.error({ err }, 'Erro comando WhatsApp'));
         }
       }
     });
