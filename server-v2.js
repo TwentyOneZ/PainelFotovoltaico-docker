@@ -691,8 +691,14 @@ function applyFreshRows(deviceId, rows) {
 async function handleDataBatch(deviceId, payloadBuf) {
   const receivedAt = new Date();
   let msg;
-  try { msg = JSON.parse(payloadBuf.toString('utf8')); }
-  catch { logger.warn({ deviceId }, 'Lote com JSON inválido'); return; }
+  const raw = payloadBuf.toString('utf8');
+  try { msg = JSON.parse(raw); }
+  catch {
+    // FW <= 3.0.1 escrevia lux NaN como "nan" (JSON invalido). Trata como null.
+    const fixed = raw.replace(/([\[,])\s*-?(?:nan|inf(?:inity)?)\s*(?=[,\]])/gi, '$1null');
+    try { msg = JSON.parse(fixed); logger.info({ deviceId }, 'Lote com NaN/Inf convertido para null'); }
+    catch { logger.warn({ deviceId }, 'Lote com JSON inválido'); return; }
+  }
   const id = msg && Number.isInteger(msg.id) ? msg.id : null;
   if (id === null || !Array.isArray(msg.r)) { logger.warn({ deviceId }, 'Lote sem id/registros'); return; }
   markDataReceived(deviceId, receivedAt);
