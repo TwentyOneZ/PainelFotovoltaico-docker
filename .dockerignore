@@ -1,0 +1,12 @@
+# Ignorar dados do MySQL (volume)
+mysql-data
+mysql-data/**
+
+# Outras coisas que não precisam ir pro build
+node_modules
+npm-debug.log
+Dockerfile*
+docker-compose.yml
+.git
+.gitignore
+*.log
